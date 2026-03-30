@@ -1,19 +1,5 @@
 #include "bot_state.h"
 
-namespace {
-
-float signOrLast(float value, float last_sign) {
-  if (value > 0.001f) {
-    return 1.0f;
-  }
-  if (value < -0.001f) {
-    return -1.0f;
-  }
-  return (last_sign != 0.0f) ? last_sign : 1.0f;
-}
-
-}  // namespace
-
 void botStateInit(BotStateMachine *machine, uint32_t now_ms) {
   if (machine == nullptr) {
     return;
@@ -21,9 +7,8 @@ void botStateInit(BotStateMachine *machine, uint32_t now_ms) {
 
   machine->current_state = BOT_IDLE;
   machine->state_entry_ms = now_ms;
-  machine->last_valid_line_ms = now_ms;
-  machine->last_valid_position = 0.0f;
-  machine->last_error_sign = 1.0f;
+  machine->line_present_count = 0U;
+  machine->line_lost_count = 0U;
 }
 
 void botStateTransition(BotStateMachine *machine, BotState next_state, uint32_t now_ms) {
@@ -45,50 +30,47 @@ BotState botStateUpdate(BotStateMachine *machine, const BotStateConfig *config, 
     return machine->current_state;
   }
 
-  if (inputs->line_strong) {
-    machine->last_valid_line_ms = inputs->now_ms;
-    machine->last_valid_position = inputs->position;
-    machine->last_error_sign = signOrLast(inputs->error, machine->last_error_sign);
-  }
-
   switch (machine->current_state) {
     case BOT_IDLE:
       break;
 
     case BOT_CALIBRATING:
       if (inputs->calibration_done) {
-        botStateTransition(machine, BOT_TRACKING, inputs->now_ms);
+        botStateTransition(machine, BOT_LINE_LOST, inputs->now_ms);
+        machine->line_present_count = 0U;
+        machine->line_lost_count = 0U;
       }
       break;
 
-    case BOT_TRACKING:
-      if (inputs->line_strong) {
-        break;
-      }
-
+    case BOT_LINE_PRESENT:
       if (inputs->line_present) {
-        botStateTransition(machine, BOT_EDGE, inputs->now_ms);
-      } else if ((inputs->now_ms - machine->last_valid_line_ms) >= config->edge_to_recover_ms) {
-        botStateTransition(machine, BOT_RECOVER, inputs->now_ms);
+        machine->line_lost_count = 0U;
       } else {
-        botStateTransition(machine, BOT_EDGE, inputs->now_ms);
+        if (machine->line_lost_count < 255U) {
+          ++machine->line_lost_count;
+        }
+      }
+
+      if (machine->line_lost_count >= config->line_lost_confirm_count) {
+        botStateTransition(machine, BOT_LINE_LOST, inputs->now_ms);
+        machine->line_present_count = 0U;
+        machine->line_lost_count = 0U;
       }
       break;
 
-    case BOT_EDGE:
+    case BOT_LINE_LOST:
       if (inputs->line_strong) {
-        botStateTransition(machine, BOT_TRACKING, inputs->now_ms);
-      } else if (!inputs->line_present &&
-                 (inputs->now_ms - machine->last_valid_line_ms) >= config->edge_to_recover_ms) {
-        botStateTransition(machine, BOT_RECOVER, inputs->now_ms);
+        if (machine->line_present_count < 255U) {
+          ++machine->line_present_count;
+        }
+      } else {
+        machine->line_present_count = 0U;
       }
-      break;
 
-    case BOT_RECOVER:
-      if (inputs->line_strong) {
-        botStateTransition(machine, BOT_TRACKING, inputs->now_ms);
-      } else if (inputs->line_present) {
-        botStateTransition(machine, BOT_EDGE, inputs->now_ms);
+      if (machine->line_present_count >= config->line_present_confirm_count) {
+        botStateTransition(machine, BOT_LINE_PRESENT, inputs->now_ms);
+        machine->line_present_count = 0U;
+        machine->line_lost_count = 0U;
       }
       break;
 
@@ -105,12 +87,10 @@ const char *botStateName(BotState state) {
       return "IDLE";
     case BOT_CALIBRATING:
       return "CALIBRATING";
-    case BOT_TRACKING:
-      return "TRACKING";
-    case BOT_EDGE:
-      return "EDGE";
-    case BOT_RECOVER:
-      return "RECOVER";
+    case BOT_LINE_PRESENT:
+      return "LINE_PRESENT";
+    case BOT_LINE_LOST:
+      return "LINE_LOST";
     case BOT_ERROR:
     default:
       return "ERROR";

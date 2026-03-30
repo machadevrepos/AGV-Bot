@@ -15,24 +15,64 @@ float clampFloat(float value, float min_value, float max_value) {
   return value;
 }
 
-float signOrStored(float value, float stored_sign) {
-  if (value > 0.001f) {
-    return 1.0f;
+int8_t directionFromPosition(float value) {
+  if (value > 0.12f) {
+    return 1;
   }
-  if (value < -0.001f) {
-    return -1.0f;
+  if (value < -0.12f) {
+    return -1;
   }
-  return (stored_sign != 0.0f) ? stored_sign : 1.0f;
+  return 0;
 }
 
-int16_t clampPwm(int32_t value) {
-  if (value > 32767L) {
-    return 32767;
+int8_t fallbackDirection(int8_t last_direction) {
+  return (last_direction < 0) ? -1 : 1;
+}
+
+bool hasOnlyLeftSensors(uint8_t active_mask) {
+  return ((active_mask & 0x03U) != 0U) && ((active_mask & 0x0CU) == 0U);
+}
+
+bool hasOnlyRightSensors(uint8_t active_mask) {
+  return ((active_mask & 0x0CU) != 0U) && ((active_mask & 0x03U) == 0U);
+}
+
+bool isOuterEdgeOnly(uint8_t active_mask) {
+  return (active_mask == 0x01U) || (active_mask == 0x08U);
+}
+
+int8_t chooseDirection(const ControlContext *ctx, const ControlEstimate *estimate) {
+  const int8_t position_direction = directionFromPosition(estimate->position);
+  if (position_direction != 0) {
+    return position_direction;
   }
-  if (value < -32768L) {
-    return -32768;
+
+  if (hasOnlyLeftSensors(estimate->active_mask)) {
+    return -1;
   }
-  return static_cast<int16_t>(value);
+  if (hasOnlyRightSensors(estimate->active_mask)) {
+    return 1;
+  }
+
+  return fallbackDirection(ctx->last_direction);
+}
+
+MotionPrimitive holdMotion(const ControlContext *ctx,
+                           MotionPrimitive desired_motion,
+                           uint32_t now_ms) {
+  if (ctx == nullptr) {
+    return desired_motion;
+  }
+
+  if (desired_motion == ctx->last_motion) {
+    return desired_motion;
+  }
+
+  if ((now_ms - ctx->last_motion_change_ms) < ctx->config.motion_hold_ms) {
+    return ctx->last_motion;
+  }
+
+  return desired_motion;
 }
 
 }  // namespace
@@ -45,7 +85,13 @@ void controlInit(ControlContext *ctx, const ControlConfig *config) {
   memset(ctx, 0, sizeof(*ctx));
   ctx->config = *config;
   ctx->last_valid_position = 0.0f;
-  ctx->last_error_sign = 1.0f;
+  ctx->filtered_position = 0.0f;
+  ctx->last_direction_change_ms = 0U;
+  ctx->last_motion_change_ms = 0U;
+  ctx->filter_seeded = false;
+  ctx->line_seen_once = false;
+  ctx->last_direction = 1;
+  ctx->last_motion = MOTION_STOP;
 }
 
 void controlReset(ControlContext *ctx) {
@@ -53,11 +99,14 @@ void controlReset(ControlContext *ctx) {
     return;
   }
 
-  ctx->last_error = 0.0f;
   ctx->last_valid_position = 0.0f;
-  ctx->last_error_sign = 1.0f;
-  ctx->last_update_ms = 0U;
-  ctx->derivative_seeded = false;
+  ctx->filtered_position = 0.0f;
+  ctx->last_direction_change_ms = 0U;
+  ctx->last_motion_change_ms = 0U;
+  ctx->filter_seeded = false;
+  ctx->line_seen_once = false;
+  ctx->last_direction = 1;
+  ctx->last_motion = MOTION_STOP;
 }
 
 void controlEstimateLine(const ControlContext *ctx, const SensorProcessedData *sensor_data, ControlEstimate *estimate) {
@@ -67,28 +116,34 @@ void controlEstimateLine(const ControlContext *ctx, const SensorProcessedData *s
 
   ControlEstimate local_estimate;
   memset(&local_estimate, 0, sizeof(local_estimate));
-  local_estimate.total_signal = sensor_data->total_signal;
-  local_estimate.peak_signal = sensor_data->peak_signal;
+  local_estimate.total_signal = sensor_data->scaled_total_signal;
+  local_estimate.peak_signal = sensor_data->scaled_peak_signal;
 
   // Weighted centroid uses all sensor magnitudes together, so one active sensor or
   // two partially active adjacent sensors both map to a smooth continuous position.
-  if (sensor_data->total_signal > 0.0f) {
+  if (sensor_data->scaled_total_signal > 0.0f) {
     float weighted_sum = 0.0f;
     for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
-      weighted_sum += sensor_data->signal[i] * ctx->config.sensor_positions[i];
+      weighted_sum += sensor_data->scaled_signal[i] * ctx->config.sensor_positions[i];
     }
-    local_estimate.position = weighted_sum / sensor_data->total_signal;
+    local_estimate.position = weighted_sum / sensor_data->scaled_total_signal;
   }
 
   const float total_component =
-      clampFloat(sensor_data->total_signal / ctx->config.confidence_total_ref, 0.0f, 1.0f);
+      clampFloat(sensor_data->scaled_total_signal / ctx->config.confidence_total_ref, 0.0f, 1.0f);
   const float peak_component =
-      clampFloat(sensor_data->peak_signal / ctx->config.confidence_peak_ref, 0.0f, 1.0f);
+      clampFloat(sensor_data->scaled_peak_signal / ctx->config.confidence_peak_ref, 0.0f, 1.0f);
   local_estimate.confidence = (0.60f * total_component) + (0.40f * peak_component);
 
   local_estimate.line_present = (local_estimate.confidence >= ctx->config.confidence_lost_threshold);
   local_estimate.line_strong = (local_estimate.confidence >= ctx->config.confidence_tracking_threshold);
   local_estimate.error = local_estimate.position;
+
+  for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
+    if (sensor_data->scaled_signal[i] > 0.0f) {
+      local_estimate.active_mask |= static_cast<uint8_t>(1U << i);
+    }
+  }
 
   *estimate = local_estimate;
 }
@@ -105,94 +160,96 @@ ControlOutput controlCompute(ControlContext *ctx, const ControlEstimate *estimat
   output.confidence = estimate->confidence;
   output.line_present = estimate->line_present;
   output.line_strong = estimate->line_strong;
-  const bool has_position_hint = (estimate->confidence >= ctx->config.confidence_edge_threshold);
+  output.active_mask = estimate->active_mask;
+  output.motion_command.primitive = MOTION_STOP;
+  output.motion_command.direction = 0;
 
-  // If the tape is fully lost, do not keep driving blindly. Hold position until
-  // the line is seen again.
-  if (!estimate->line_present) {
-    ctx->last_update_ms = now_ms;
-    ctx->last_error = 0.0f;
-    ctx->derivative_seeded = false;
+  if (state == BOT_IDLE || state == BOT_CALIBRATING || state == BOT_ERROR) {
     return output;
   }
 
-  if (estimate->line_strong) {
-    ctx->last_valid_position = estimate->position;
-    ctx->last_error_sign = signOrStored(estimate->position, ctx->last_error_sign);
-  }
+  if (estimate->line_present) {
+    ctx->line_seen_once = true;
 
-  float effective_error = ctx->last_valid_position;
-  int16_t base_pwm = 0;
+    if (!ctx->filter_seeded) {
+      ctx->filtered_position = estimate->position;
+      ctx->filter_seeded = true;
+    } else {
+      const float alpha = clampFloat(ctx->config.position_filter_alpha, 0.0f, 1.0f);
+      ctx->filtered_position =
+          (alpha * estimate->position) + ((1.0f - alpha) * ctx->filtered_position);
+    }
 
-  switch (state) {
-    case BOT_TRACKING:
-      effective_error = has_position_hint ? estimate->position : ctx->last_valid_position;
-      base_pwm = ctx->config.base_pwm_tracking;
-      break;
+    ctx->last_valid_position = ctx->filtered_position;
 
-    case BOT_EDGE:
-      effective_error = has_position_hint
-                            ? ((0.60f * ctx->last_valid_position) + (0.40f * estimate->position))
-                            : ctx->last_valid_position;
-      base_pwm = ctx->config.base_pwm_edge;
-      break;
+    ControlEstimate smoothed_estimate = *estimate;
+    smoothed_estimate.position = ctx->filtered_position;
+    smoothed_estimate.error = ctx->filtered_position;
 
-    case BOT_RECOVER:
-      effective_error = 1.35f * signOrStored(ctx->last_valid_position, ctx->last_error_sign);
-      base_pwm = ctx->config.base_pwm_recover;
-      break;
-
-    case BOT_IDLE:
-    case BOT_CALIBRATING:
-    case BOT_ERROR:
-    default:
-      effective_error = 0.0f;
-      base_pwm = 0;
-      break;
-  }
-
-  if (fabsf(effective_error) < ctx->config.error_deadband) {
-    effective_error = 0.0f;
-  }
-
-  float derivative = 0.0f;
-  if (ctx->derivative_seeded) {
-    const uint32_t dt_ms = now_ms - ctx->last_update_ms;
-    if (dt_ms > 0U) {
-      derivative = (effective_error - ctx->last_error) / (static_cast<float>(dt_ms) * 0.001f);
+    const int8_t seen_direction = chooseDirection(ctx, &smoothed_estimate);
+    if (seen_direction != 0) {
+      const bool direction_changed = (seen_direction != ctx->last_direction);
+      if (direction_changed &&
+          (now_ms - ctx->last_direction_change_ms) >= ctx->config.direction_hold_ms) {
+        ctx->last_direction = seen_direction;
+        ctx->last_direction_change_ms = now_ms;
+      } else if (!direction_changed) {
+        ctx->last_direction_change_ms = now_ms;
+      }
     }
   }
 
-  ctx->last_update_ms = now_ms;
-  ctx->last_error = effective_error;
-  ctx->derivative_seeded = true;
-
-  float turn = (ctx->config.kp * effective_error) + (ctx->config.kd * derivative);
-  turn = clampFloat(turn, -ctx->config.max_turn_pwm, ctx->config.max_turn_pwm);
-
-  if (state == BOT_RECOVER) {
-    turn = static_cast<float>(ctx->config.recover_turn_pwm) * signOrStored(effective_error, ctx->last_error_sign);
+  // Stay stopped after power-on until the stripe has been detected once.
+  if (!ctx->line_seen_once) {
+    return output;
   }
 
-  float base_scale = 1.0f - (ctx->config.speed_reduction_gain * clampFloat(fabsf(effective_error) / 1.5f, 0.0f, 1.0f));
-  base_scale = clampFloat(base_scale, ctx->config.min_base_scale, 1.0f);
-  const int32_t scaled_base = static_cast<int32_t>(static_cast<float>(base_pwm) * base_scale);
+  if (state == BOT_LINE_LOST || !estimate->line_present) {
+    output.error = ctx->last_valid_position;
+    output.motion_command.direction = 0;
+    output.motion_command.primitive = MOTION_STOP;
+    if (output.motion_command.primitive != ctx->last_motion) {
+      ctx->last_motion = output.motion_command.primitive;
+      ctx->last_motion_change_ms = now_ms;
+    }
+    return output;
+  }
 
-  output.base_pwm = static_cast<int16_t>(scaled_base);
-  output.error = effective_error;
-  output.derivative = derivative;
-  output.turn_command = turn;
-  output.left_pwm = clampPwm(static_cast<int32_t>(scaled_base) - static_cast<int32_t>(turn));
-  output.right_pwm = clampPwm(static_cast<int32_t>(scaled_base) + static_cast<int32_t>(turn));
+  const float motion_position = ctx->filtered_position;
+  const float abs_position = fabsf(motion_position);
+  ControlEstimate smoothed_estimate = *estimate;
+  smoothed_estimate.position = motion_position;
+  smoothed_estimate.error = motion_position;
 
+  const int8_t direction = chooseDirection(ctx, &smoothed_estimate);
+  output.position = motion_position;
+  output.error = motion_position;
+  output.motion_command.direction = direction;
 
-  if (state == BOT_IDLE || state == BOT_CALIBRATING || state == BOT_ERROR) {
-    output.left_pwm = 0;
-    output.right_pwm = 0;
-    output.base_pwm = 0;
-    output.turn_command = 0.0f;
-    output.error = 0.0f;
-    output.derivative = 0.0f;
+  MotionPrimitive desired_motion = MOTION_FORWARD;
+  const bool stay_in_forward = (ctx->last_motion == MOTION_FORWARD) &&
+                               (abs_position <= ctx->config.center_exit_threshold);
+  const bool enter_forward = abs_position <= ctx->config.center_enter_threshold;
+
+  if (stay_in_forward || enter_forward) {
+    desired_motion = MOTION_FORWARD;
+    output.motion_command.direction = 0;
+  } else {
+    desired_motion =
+        (isOuterEdgeOnly(estimate->active_mask) || abs_position >= ctx->config.rotate_threshold)
+            ? MOTION_ROTATE
+            : MOTION_ARC;
+  }
+
+  output.motion_command.primitive = holdMotion(ctx, desired_motion, now_ms);
+
+  if (output.motion_command.primitive == MOTION_FORWARD) {
+    output.motion_command.direction = 0;
+  }
+
+  if (output.motion_command.primitive != ctx->last_motion) {
+    ctx->last_motion = output.motion_command.primitive;
+    ctx->last_motion_change_ms = now_ms;
   }
 
   return output;

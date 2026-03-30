@@ -4,11 +4,114 @@
 #include <math.h>
 #include <string.h>
 
-bool sensorReadInit(SensorReadContext *ctx, const SensorReadConfig *config, TwoWire *wire) {
-  if (ctx == nullptr || config == nullptr || wire == nullptr) {
+namespace {
+
+constexpr uint8_t kAdsRegConversion = 0x00;
+constexpr uint8_t kAdsRegConfig = 0x01;
+
+constexpr uint16_t kAdsOsSingle = 0x8000;
+constexpr uint16_t kAdsModeSingle = 0x0100;
+constexpr uint16_t kAdsDr128Sps = 0x0080;
+constexpr uint16_t kAdsCompDisable = 0x0003;
+constexpr uint16_t kAdsPgaOne = 0x0200;
+constexpr uint16_t kAdsMuxSingleEnded[SENSOR_COUNT] = {0x4000, 0x5000, 0x6000, 0x7000};
+
+float clampFloat(float value, float min_value, float max_value) {
+  if (value < min_value) {
+    return min_value;
+  }
+  if (value > max_value) {
+    return max_value;
+  }
+  return value;
+}
+
+float normalizeSignal(float signal, float sensor_max, float min_sensor_max) {
+  if (signal <= 0.0f) {
+    return 0.0f;
+  }
+
+  if (sensor_max <= min_sensor_max) {
+    return 0.0f;
+  }
+
+  const float scaled = (100.0f * signal) / sensor_max;
+  return clampFloat(scaled, 0.0f, 100.0f);
+}
+
+uint16_t adsGainToConfigBits(adsGain_t gain) {
+  switch (gain) {
+    case GAIN_TWOTHIRDS:
+      return 0x0000;
+    case GAIN_ONE:
+      return 0x0200;
+    case GAIN_TWO:
+      return 0x0400;
+    case GAIN_FOUR:
+      return 0x0600;
+    case GAIN_EIGHT:
+      return 0x0800;
+    case GAIN_SIXTEEN:
+      return 0x0A00;
+    default:
+      return kAdsPgaOne;
+  }
+}
+
+bool adsWriteConfig(I2cBusContext *bus, uint8_t address, uint16_t config) {
+  const uint8_t bytes[2] = {
+      static_cast<uint8_t>((config >> 8) & 0xFFU),
+      static_cast<uint8_t>(config & 0xFFU),
+  };
+  return i2cBusWriteRegister(bus, address, kAdsRegConfig, bytes, sizeof(bytes));
+}
+
+bool adsReadConversion(I2cBusContext *bus, uint8_t address, int16_t *value) {
+  if (value == nullptr) {
     return false;
   }
 
+  uint8_t bytes[2] = {0U, 0U};
+  if (!i2cBusReadRegister(bus, address, kAdsRegConversion, bytes, sizeof(bytes))) {
+    return false;
+  }
+
+  *value = static_cast<int16_t>((static_cast<uint16_t>(bytes[0]) << 8) | bytes[1]);
+  return true;
+}
+
+bool adsReadSingleEnded(I2cBusContext *bus,
+                        uint8_t address,
+                        adsGain_t gain,
+                        uint8_t channel,
+                        int16_t *result) {
+  if (bus == nullptr || result == nullptr || channel >= SENSOR_COUNT) {
+    return false;
+  }
+
+  const uint16_t config = kAdsOsSingle |
+                          kAdsMuxSingleEnded[channel] |
+                          adsGainToConfigBits(gain) |
+                          kAdsModeSingle |
+                          kAdsDr128Sps |
+                          kAdsCompDisable;
+
+  if (!adsWriteConfig(bus, address, config)) {
+    return false;
+  }
+
+  delay(10);
+  return adsReadConversion(bus, address, result);
+}
+
+}  // namespace
+
+bool sensorReadInit(SensorReadContext *ctx, const SensorReadConfig *config, I2cBusContext *bus) {
+  if (ctx == nullptr || config == nullptr || bus == nullptr) {
+    return false;
+  }
+
+  ctx->bus = bus;
   ctx->config = *config;
   ctx->initialized = false;
   ctx->filter_seeded = false;
@@ -16,13 +119,11 @@ bool sensorReadInit(SensorReadContext *ctx, const SensorReadConfig *config, TwoW
     ctx->filtered_raw[i] = 0.0f;
   }
 
-  if (!ctx->ads.begin(config->i2c_address, wire)) {
+  if (!i2cBusProbe(ctx->bus, config->i2c_address)) {
     return false;
   }
 
-  ctx->ads.setGain(config->gain);
   ctx->initialized = true;
-  ctx->filter_seeded = false;
   return true;
 }
 
@@ -44,7 +145,10 @@ bool sensorReadReadRaw(SensorReadContext *ctx, SensorRawData *raw_frame) {
   }
 
   for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
-    raw_frame->value[i] = ctx->ads.readADC_SingleEnded(i);
+    if (!adsReadSingleEnded(ctx->bus, ctx->config.i2c_address, ctx->config.gain, i, &raw_frame->value[i])) {
+      raw_frame->valid = false;
+      return false;
+    }
   }
 
   raw_frame->valid = true;
@@ -94,17 +198,23 @@ bool sensorReadProcess(SensorReadContext *ctx,
       delta -= mean_delta;
     }
 
-    // Use magnitude so the same controller works even if sensor polarity is reversed.
     float signal = fabsf(delta) * calibration->scale[i];
     if (signal < ctx->config.signal_floor) {
       signal = 0.0f;
     }
+    const float scaled_signal =
+        normalizeSignal(signal, ctx->config.sensor_max[i], ctx->config.min_sensor_max);
 
     local_frame.delta[i] = delta;
     local_frame.signal[i] = signal;
+    local_frame.scaled_signal[i] = scaled_signal;
     local_frame.total_signal += signal;
     if (signal > local_frame.peak_signal) {
       local_frame.peak_signal = signal;
+    }
+    local_frame.scaled_total_signal += scaled_signal;
+    if (scaled_signal > local_frame.scaled_peak_signal) {
+      local_frame.scaled_peak_signal = scaled_signal;
     }
 
     ctx->filtered_raw[i] = local_frame.filtered[i];

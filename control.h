@@ -5,6 +5,7 @@
 
 #include "bot_common.h"
 #include "bot_state.h"
+#include "motor_drive.h"
 #include "sensor_read.h"
 
 struct ControlConfig {
@@ -12,18 +13,13 @@ struct ControlConfig {
   float confidence_total_ref;
   float confidence_peak_ref;
   float confidence_tracking_threshold;
-  float confidence_edge_threshold;
   float confidence_lost_threshold;
-  float error_deadband;
-  float min_base_scale;
-  float speed_reduction_gain;
-  float kp;
-  float kd;
-  float max_turn_pwm;
-  int16_t base_pwm_tracking;
-  int16_t base_pwm_edge;
-  int16_t base_pwm_recover;
-  int16_t recover_turn_pwm;
+  float position_filter_alpha;
+  float center_enter_threshold;
+  float center_exit_threshold;
+  float rotate_threshold;
+  uint16_t direction_hold_ms;
+  uint16_t motion_hold_ms;
 };
 
 struct ControlEstimate {
@@ -34,28 +30,29 @@ struct ControlEstimate {
   float peak_signal;
   bool line_present;
   bool line_strong;
+  uint8_t active_mask;
 };
 
 struct ControlOutput {
-  int16_t left_pwm;
-  int16_t right_pwm;
-  int16_t base_pwm;
+  MotionCommand motion_command;
   float position;
   float error;
-  float derivative;
-  float turn_command;
   float confidence;
   bool line_present;
   bool line_strong;
+  uint8_t active_mask;
 };
 
 struct ControlContext {
   ControlConfig config;
-  float last_error;
   float last_valid_position;
-  float last_error_sign;
-  uint32_t last_update_ms;
-  bool derivative_seeded;
+  float filtered_position;
+  uint32_t last_direction_change_ms;
+  uint32_t last_motion_change_ms;
+  bool filter_seeded;
+  bool line_seen_once;
+  int8_t last_direction;
+  MotionPrimitive last_motion;
 };
 
 void controlInit(ControlContext *ctx, const ControlConfig *config);

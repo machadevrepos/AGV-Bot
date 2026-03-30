@@ -4,6 +4,7 @@
 #include "bot_state.h"
 #include "calibration.h"
 #include "control.h"
+#include "i2c_bus.h"
 #include "motor_drive.h"
 #include "sensor_read.h"
 
@@ -14,7 +15,13 @@ constexpr uint8_t kAds1115Address = 0x48;
 constexpr uint8_t kPca9685Address = 0x40;
 constexpr int kI2cSdaPin = 17;
 constexpr int kI2cSclPin = 18;
-constexpr uint8_t kOverallSpeedPercent = 160;
+constexpr uint32_t kI2cClockHz = 50000;
+constexpr uint8_t kI2cRetryCount = 2U;
+constexpr uint16_t kI2cRetryDelayMs = 2U;
+constexpr uint16_t kI2cRecoveryDelayMs = 2U;
+constexpr uint16_t kI2cTransactionGapUs = 500U;
+constexpr uint16_t kI2cFailureCooldownMs = 20U;
+constexpr uint8_t kI2cMaxConsecutiveFailures = 2U;
 
 constexpr uint16_t kControlLoopMs = 10;
 constexpr uint16_t kCalibrationSamples = 130;
@@ -22,36 +29,36 @@ constexpr uint16_t kCalibrationSampleDelayMs = 4;
 constexpr uint32_t kDebugIntervalMs = 200;
 
 constexpr float kFilterAlpha = 0.7f;
-constexpr float kSignalFloor = 12.0f;
+constexpr float kSignalFloor = 5.0f;
+// Replace these with measured "strong on tape" magnitudes for each sensor.
+constexpr float kObservedStrongOnTape[SENSOR_COUNT] = {32.5f, 86.1f, 25.3f, 28.2f};
+constexpr float kSignalHeadroomPercent = 0.20f;
+constexpr float kMinSensorMax = 0.001f;
 
 constexpr int16_t kPwmMax = 4095;
-constexpr int16_t kMotorDeadzone = 120;
-constexpr int16_t kBasePwmTracking = 1180;
-constexpr int16_t kBasePwmEdge = 500;
-constexpr int16_t kBasePwmRecover = 720;
-constexpr int16_t kRecoverTurnPwm = 980;
-
-constexpr float kKp = 1100.0f;
-constexpr float kKd = 150.0f;
-constexpr float kMaxTurnPwm = 3800.0f;
-constexpr float kErrorDeadband = 0.008f;
-constexpr float kMinBaseScale = 0.15f;
-constexpr float kSpeedReductionGain = 0.96f;
+constexpr int16_t MOTOR_PWM = 1500;
 
 constexpr float kConfidenceTotalRef = 240.0f;
 constexpr float kConfidencePeakRef = 120.0f;
 constexpr float kConfidenceTrackingThreshold = 0.55f;
-constexpr float kConfidenceEdgeThreshold = 0.28f;
 constexpr float kConfidenceLostThreshold = 0.14f;
-
-constexpr uint32_t kEdgeToRecoverMs = 160;
+constexpr float kPositionFilterAlpha = 0.25f;
+constexpr float kCenterEnterThreshold = 0.28f;
+constexpr float kCenterExitThreshold = 0.42f;
+constexpr float kRotateThreshold = 1.25f;
+constexpr uint16_t kDirectionHoldMs = 50;
+constexpr uint16_t kMotionHoldMs = 90;
+constexpr uint8_t kLinePresentConfirmCount = 3;
+constexpr uint8_t kLineLostConfirmCount = 3;
 
 // Keep this array aligned with the physical left-to-right sensor order.
 // To reverse the sensor order later, only swap these positions.
 constexpr float kSensorPositions[SENSOR_COUNT] = {-1.5f, -0.5f, 0.5f, 1.5f};
 
-constexpr bool kInvertLeftMotor = false;
-constexpr bool kInvertRightMotor = false;
+constexpr bool FL_REVERSED = false;
+constexpr bool FR_REVERSED = false;
+constexpr bool RL_REVERSED = false;
+constexpr bool RR_REVERSED = false;
 
 }  // namespace AppConfig
 
@@ -64,6 +71,7 @@ static CalibrationData g_calibration;
 static MotorDriveContext g_motor_ctx;
 static BotStateMachine g_state_machine;
 static ControlContext g_control_ctx;
+static I2cBusContext g_i2c_bus;
 static SensorReadConfig g_sensor_config;
 static MotorDriveConfig g_motor_config;
 static ControlConfig g_control_config;
@@ -74,6 +82,12 @@ static uint32_t g_last_debug_ms = 0U;
 static bool g_init_ok = false;
 static bool g_calibration_done = false;
 
+static float deriveSensorMax(float observed_strong_on_tape,
+                             float headroom_percent,
+                             float min_sensor_max) {
+  const float sensor_max = observed_strong_on_tape * (1.0f + headroom_percent);
+  return (sensor_max > min_sensor_max) ? sensor_max : min_sensor_max;
+}
 
 static SensorReadConfig makeSensorConfig() {
   SensorReadConfig config;
@@ -82,6 +96,13 @@ static SensorReadConfig makeSensorConfig() {
   config.filter_alpha = AppConfig::kFilterAlpha;
   config.common_mode_rejection = true;
   config.signal_floor = AppConfig::kSignalFloor;
+  config.headroom_percent = AppConfig::kSignalHeadroomPercent;
+  config.min_sensor_max = AppConfig::kMinSensorMax;
+  for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
+    config.observed_strong_on_tape[i] = AppConfig::kObservedStrongOnTape[i];
+    config.sensor_max[i] =
+        deriveSensorMax(config.observed_strong_on_tape[i], config.headroom_percent, config.min_sensor_max);
+  }
   return config;
 }
 
@@ -90,13 +111,15 @@ static MotorDriveConfig makeMotorConfig() {
   config.i2c_address = AppConfig::kPca9685Address;
   config.pwm_frequency_hz = 1000;
   config.pwm_max = AppConfig::kPwmMax;
-  config.pwm_deadzone = AppConfig::kMotorDeadzone;
-  config.invert_left = AppConfig::kInvertLeftMotor;
-  config.invert_right = AppConfig::kInvertRightMotor;
-  config.right_front = {0, 1};
-  config.right_back = {6, 7};
-  config.left_front = {2, 3};
-  config.left_back = {4, 5};
+  config.motor_pwm = AppConfig::MOTOR_PWM;
+  config.front_left_reversed = AppConfig::FL_REVERSED;
+  config.front_right_reversed = AppConfig::FR_REVERSED;
+  config.rear_left_reversed = AppConfig::RL_REVERSED;
+  config.rear_right_reversed = AppConfig::RR_REVERSED;
+  config.front_right = {0, 1};
+  config.front_left = {2, 3};
+  config.rear_left = {4, 5};
+  config.rear_right = {6, 7};
   return config;
 }
 
@@ -108,27 +131,34 @@ static ControlConfig makeControlConfig() {
   config.confidence_total_ref = AppConfig::kConfidenceTotalRef;
   config.confidence_peak_ref = AppConfig::kConfidencePeakRef;
   config.confidence_tracking_threshold = AppConfig::kConfidenceTrackingThreshold;
-  config.confidence_edge_threshold = AppConfig::kConfidenceEdgeThreshold;
   config.confidence_lost_threshold = AppConfig::kConfidenceLostThreshold;
-  config.error_deadband = AppConfig::kErrorDeadband;
-  config.min_base_scale = AppConfig::kMinBaseScale;
-  config.speed_reduction_gain = AppConfig::kSpeedReductionGain;
-  config.kp = AppConfig::kKp;
-  config.kd = AppConfig::kKd;
-  config.max_turn_pwm = AppConfig::kMaxTurnPwm;
-  config.base_pwm_tracking = static_cast<int16_t>((static_cast<long>(AppConfig::kBasePwmTracking) *
-      AppConfig::kOverallSpeedPercent) / 100L);
-  config.base_pwm_edge = static_cast<int16_t>((static_cast<long>(AppConfig::kBasePwmEdge) *
-      AppConfig::kOverallSpeedPercent) / 100L);
-  config.base_pwm_recover = static_cast<int16_t>((static_cast<long>(AppConfig::kBasePwmRecover) *
-      AppConfig::kOverallSpeedPercent) / 100L);
-  config.recover_turn_pwm = AppConfig::kRecoverTurnPwm;
+  config.position_filter_alpha = AppConfig::kPositionFilterAlpha;
+  config.center_enter_threshold = AppConfig::kCenterEnterThreshold;
+  config.center_exit_threshold = AppConfig::kCenterExitThreshold;
+  config.rotate_threshold = AppConfig::kRotateThreshold;
+  config.direction_hold_ms = AppConfig::kDirectionHoldMs;
+  config.motion_hold_ms = AppConfig::kMotionHoldMs;
+  return config;
+}
+
+static I2cBusConfig makeI2cBusConfig() {
+  I2cBusConfig config;
+  config.sda_pin = AppConfig::kI2cSdaPin;
+  config.scl_pin = AppConfig::kI2cSclPin;
+  config.clock_hz = AppConfig::kI2cClockHz;
+  config.retry_count = AppConfig::kI2cRetryCount;
+  config.retry_delay_ms = AppConfig::kI2cRetryDelayMs;
+  config.recovery_delay_ms = AppConfig::kI2cRecoveryDelayMs;
+  config.transaction_gap_us = AppConfig::kI2cTransactionGapUs;
+  config.failure_cooldown_ms = AppConfig::kI2cFailureCooldownMs;
+  config.max_consecutive_failures = AppConfig::kI2cMaxConsecutiveFailures;
   return config;
 }
 
 static BotStateConfig makeStateConfig() {
-  BotStateConfig config;
-  config.edge_to_recover_ms = AppConfig::kEdgeToRecoverMs;
+  BotStateConfig config = {};
+  config.line_present_confirm_count = AppConfig::kLinePresentConfirmCount;
+  config.line_lost_confirm_count = AppConfig::kLineLostConfirmCount;
   return config;
 }
 
@@ -153,6 +183,7 @@ static bool sampleCalibrationFrame(void *user_context, int16_t out_values[SENSOR
 static void printRateLimitedDebug(const SensorProcessedData &sensor_data,
                                   const ControlEstimate &estimate,
                                   const ControlOutput &output,
+                                  const MecanumWheelPwm &wheel_pwm,
                                   BotState state,
                                   uint32_t now_ms) {
   if ((now_ms - g_last_debug_ms) < AppConfig::kDebugIntervalMs) {
@@ -169,15 +200,37 @@ static void printRateLimitedDebug(const SensorProcessedData &sensor_data,
   Serial.print(output.position, 3);
   Serial.print(" err=");
   Serial.print(output.error, 3);
-  Serial.print(" turn=");
-  Serial.print(output.turn_command, 1);
-  Serial.print(" pwmL=");
-  Serial.print(output.left_pwm);
-  Serial.print(" pwmR=");
-  Serial.print(output.right_pwm);
+  Serial.print(" mask=0x");
+  Serial.print(output.active_mask, HEX);
+  Serial.print(" motion=");
+  Serial.print(motionPrimitiveName(output.motion_command.primitive));
+  Serial.print(" dir=");
+  if (output.motion_command.direction < 0) {
+    Serial.print("L");
+  } else if (output.motion_command.direction > 0) {
+    Serial.print("R");
+  } else {
+    Serial.print("C");
+  }
+  Serial.print(" wheels=[");
+  Serial.print(wheel_pwm.front_left);
+  Serial.print(", ");
+  Serial.print(wheel_pwm.front_right);
+  Serial.print(", ");
+  Serial.print(wheel_pwm.rear_left);
+  Serial.print(", ");
+  Serial.print(wheel_pwm.rear_right);
+  Serial.print("]");
   Serial.print(" sig=[");
   for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
     Serial.print(sensor_data.signal[i], 1);
+    if (i + 1U < SENSOR_COUNT) {
+      Serial.print(", ");
+    }
+  }
+  Serial.print("] scaledSig=[");
+  for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
+    Serial.print(sensor_data.scaled_signal[i], 1);
     if (i + 1U < SENSOR_COUNT) {
       Serial.print(", ");
     }
@@ -212,12 +265,11 @@ static bool performStartupCalibration() {
 
 void setup() {
   Serial.begin(AppConfig::kSerialBaud);
-  delay(200);
+  delay(1500);
 
-  // Use the known wiring pins directly. On ESP32-S3, board-default I2C pins often
-  // do not match the pins actually used on a custom robot controller.
-  Wire.begin(AppConfig::kI2cSdaPin, AppConfig::kI2cSclPin);
-  Wire.setClock(400000);
+  const I2cBusConfig i2c_bus_config = makeI2cBusConfig();
+  const bool i2c_ok = i2cBusInit(&g_i2c_bus, &Wire, &i2c_bus_config);
+  delay(200);
 
   Serial.print("ads_addr=0x");
   Serial.println(AppConfig::kAds1115Address, HEX);
@@ -227,22 +279,36 @@ void setup() {
   Serial.print(AppConfig::kI2cSdaPin);
   Serial.print(",");
   Serial.println(AppConfig::kI2cSclPin);
-  Serial.print("base_speed_percent=");
-  Serial.println(AppConfig::kOverallSpeedPercent);
+  Serial.print("i2c_freq=");
+  Serial.println(AppConfig::kI2cClockHz);
+  Serial.print("motor_pwm=");
+  Serial.println(AppConfig::MOTOR_PWM);
 
   g_sensor_config = makeSensorConfig();
   g_motor_config = makeMotorConfig();
   g_control_config = makeControlConfig();
   g_state_config = makeStateConfig();
 
+  Serial.print("sensor_max=[");
+  for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
+    Serial.print(g_sensor_config.sensor_max[i], 2);
+    if (i + 1U < SENSOR_COUNT) {
+      Serial.print(", ");
+    }
+  }
+  Serial.println("]");
+
   botStateInit(&g_state_machine, millis());
   controlInit(&g_control_ctx, &g_control_config);
   calibrationReset(&g_calibration);
 
-  const bool ads_ok = sensorReadInit(&g_sensor_ctx, &g_sensor_config, &Wire);
-  const bool pca_ok = motorDriveInit(&g_motor_ctx, &g_motor_config, &Wire);
-  g_init_ok = ads_ok && pca_ok;
+  const bool ads_ok = i2c_ok && sensorReadInit(&g_sensor_ctx, &g_sensor_config, &g_i2c_bus);
+  const bool pca_ok = i2c_ok && motorDriveInit(&g_motor_ctx, &g_motor_config, &g_i2c_bus);
+  g_init_ok = i2c_ok && ads_ok && pca_ok;
 
+  if (!i2c_ok) {
+    Serial.println("i2c_init_failed");
+  }
   if (!ads_ok) {
     Serial.println("ads_init_failed");
   }
@@ -268,7 +334,7 @@ void setup() {
   }
 
   controlReset(&g_control_ctx);
-  botStateTransition(&g_state_machine, BOT_TRACKING, millis());
+  botStateTransition(&g_state_machine, BOT_LINE_LOST, millis());
   Serial.println("tracking_ready");
 }
 
@@ -312,9 +378,9 @@ void loop() {
 
   const BotState state = botStateUpdate(&g_state_machine, &g_state_config, &state_inputs);
   const ControlOutput output = controlCompute(&g_control_ctx, &estimate, state, now_ms);
+  const MecanumWheelPwm wheel_pwm = motorDriveApplyCommand(&g_motor_ctx, &output.motion_command);
 
-  motorDriveSetMotors(&g_motor_ctx, output.left_pwm, output.right_pwm);
-  printRateLimitedDebug(processed_frame, estimate, output, state, now_ms);
+  printRateLimitedDebug(processed_frame, estimate, output, wheel_pwm, state, now_ms);
 }
 
 
