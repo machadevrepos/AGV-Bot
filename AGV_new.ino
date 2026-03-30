@@ -31,7 +31,7 @@ constexpr uint32_t kDebugIntervalMs = 200;
 constexpr float kFilterAlpha = 0.7f;
 constexpr float kSignalFloor = 5.0f;
 // Replace these with measured "strong on tape" magnitudes for each sensor.
-constexpr float kObservedStrongOnTape[SENSOR_COUNT] = {32.5f, 86.1f, 25.3f, 28.2f};
+constexpr float kObservedStrongOnTape[SENSOR_COUNT] = {16.0f, 48.0f, 23.0f, 12.0f};
 constexpr float kSignalHeadroomPercent = 0.20f;
 constexpr float kMinSensorMax = 0.001f;
 
