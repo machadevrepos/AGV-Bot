@@ -269,8 +269,8 @@ MecanumWheelPwm motorDriveApplyMotion(MotorDriveContext *ctx, MotionPrimitive pr
       break;
 
     case MOTION_ROTATE:
-      wheel_pwm = (direction < 0) ? makeWheelPwm(ctx, -1, 1, -1, 1)
-                                  : makeWheelPwm(ctx, 1, -1, 1, -1);
+      wheel_pwm = (direction < 0) ? makeWheelPwm(ctx, 1, -1, 1, -1)
+                                  : makeWheelPwm(ctx, -1, 1, -1, 1);
       break;
 
     case MOTION_REAR_PIVOT:

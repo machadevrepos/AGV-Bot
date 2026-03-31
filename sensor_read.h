@@ -33,18 +33,17 @@ struct SensorReadConfig {
   uint8_t i2c_address;
   adsGain_t gain;
   float filter_alpha;
-  bool common_mode_rejection;
   float signal_floor;
-  float observed_strong_on_tape[SENSOR_COUNT];
-  float headroom_percent;
-  float sensor_max[SENSOR_COUNT];
-  float min_sensor_max;
+  float signal_activate_threshold;
+  float signal_deactivate_threshold;
+  float baseline_follow_alpha;
 };
 
 struct SensorReadContext {
   I2cBusContext *bus;
   SensorReadConfig config;
   float filtered_raw[SENSOR_COUNT];
+  bool sensor_active[SENSOR_COUNT];
   bool initialized;
   bool filter_seeded;
 };
@@ -54,7 +53,7 @@ void sensorReadResetFilters(SensorReadContext *ctx);
 bool sensorReadReadRaw(SensorReadContext *ctx, SensorRawData *raw_frame);
 bool sensorReadProcess(SensorReadContext *ctx,
                        const SensorRawData *raw_frame,
-                       const CalibrationData *calibration,
+                       CalibrationData *calibration,
                        SensorProcessedData *processed_frame);
 
 #endif

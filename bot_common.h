@@ -3,6 +3,6 @@
 
 #include <stdint.h>
 
-static const uint8_t SENSOR_COUNT = 4;
+static const uint8_t SENSOR_COUNT = 3;
 
 #endif

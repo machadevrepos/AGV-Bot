@@ -14,7 +14,7 @@ constexpr uint16_t kAdsModeSingle = 0x0100;
 constexpr uint16_t kAdsDr128Sps = 0x0080;
 constexpr uint16_t kAdsCompDisable = 0x0003;
 constexpr uint16_t kAdsPgaOne = 0x0200;
-constexpr uint16_t kAdsMuxSingleEnded[SENSOR_COUNT] = {0x4000, 0x5000, 0x6000, 0x7000};
+constexpr uint16_t kAdsMuxSingleEnded[SENSOR_COUNT] = {0x4000, 0x5000, 0x6000};
 
 float clampFloat(float value, float min_value, float max_value) {
   if (value < min_value) {
@@ -24,19 +24,6 @@ float clampFloat(float value, float min_value, float max_value) {
     return max_value;
   }
   return value;
-}
-
-float normalizeSignal(float signal, float sensor_max, float min_sensor_max) {
-  if (signal <= 0.0f) {
-    return 0.0f;
-  }
-
-  if (sensor_max <= min_sensor_max) {
-    return 0.0f;
-  }
-
-  const float scaled = (100.0f * signal) / sensor_max;
-  return clampFloat(scaled, 0.0f, 100.0f);
 }
 
 uint16_t adsGainToConfigBits(adsGain_t gain) {
@@ -117,6 +104,7 @@ bool sensorReadInit(SensorReadContext *ctx, const SensorReadConfig *config, I2cB
   ctx->filter_seeded = false;
   for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
     ctx->filtered_raw[i] = 0.0f;
+    ctx->sensor_active[i] = false;
   }
 
   if (!i2cBusProbe(ctx->bus, config->i2c_address)) {
@@ -134,6 +122,7 @@ void sensorReadResetFilters(SensorReadContext *ctx) {
 
   for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
     ctx->filtered_raw[i] = 0.0f;
+    ctx->sensor_active[i] = false;
   }
 
   ctx->filter_seeded = false;
@@ -158,7 +147,7 @@ bool sensorReadReadRaw(SensorReadContext *ctx, SensorRawData *raw_frame) {
 
 bool sensorReadProcess(SensorReadContext *ctx,
                        const SensorRawData *raw_frame,
-                       const CalibrationData *calibration,
+                       CalibrationData *calibration,
                        SensorProcessedData *processed_frame) {
   if (ctx == nullptr || raw_frame == nullptr || calibration == nullptr || processed_frame == nullptr) {
     return false;
@@ -173,8 +162,6 @@ bool sensorReadProcess(SensorReadContext *ctx,
   local_frame.valid = true;
   local_frame.timestamp_ms = raw_frame->timestamp_ms;
 
-  float mean_delta = 0.0f;
-
   for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
     local_frame.raw[i] = raw_frame->value[i];
 
@@ -186,24 +173,25 @@ bool sensorReadProcess(SensorReadContext *ctx,
     }
 
     local_frame.filtered[i] = filtered;
-    local_frame.delta[i] = filtered - calibration->baseline[i];
-    mean_delta += local_frame.delta[i];
-  }
+    float delta = filtered - calibration->baseline[i];
+    float signal = fabsf(delta) * calibration->scale[i];
+    const bool was_active = ctx->sensor_active[i];
+    const float activity_threshold =
+        was_active ? ctx->config.signal_deactivate_threshold : ctx->config.signal_activate_threshold;
+    const bool is_active = signal >= activity_threshold;
 
-  mean_delta /= static_cast<float>(SENSOR_COUNT);
-
-  for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
-    float delta = local_frame.delta[i];
-    if (ctx->config.common_mode_rejection) {
-      delta -= mean_delta;
+    // Follow slow idle drift only while the channel is inactive.
+    if (!is_active) {
+      calibration->baseline[i] += ctx->config.baseline_follow_alpha * delta;
+      delta = filtered - calibration->baseline[i];
+      signal = fabsf(delta) * calibration->scale[i];
     }
 
-    float signal = fabsf(delta) * calibration->scale[i];
     if (signal < ctx->config.signal_floor) {
       signal = 0.0f;
     }
-    const float scaled_signal =
-        normalizeSignal(signal, ctx->config.sensor_max[i], ctx->config.min_sensor_max);
+    const float scaled_signal = is_active ? signal : 0.0f;
+    ctx->sensor_active[i] = is_active;
 
     local_frame.delta[i] = delta;
     local_frame.signal[i] = signal;

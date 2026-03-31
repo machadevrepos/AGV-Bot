@@ -16,10 +16,10 @@ float clampFloat(float value, float min_value, float max_value) {
 }
 
 int8_t directionFromPosition(float value) {
-  if (value > 0.12f) {
+  if (value > 0.10f) {
     return 1;
   }
-  if (value < -0.12f) {
+  if (value < -0.10f) {
     return -1;
   }
   return 0;
@@ -29,16 +29,32 @@ int8_t fallbackDirection(int8_t last_direction) {
   return (last_direction < 0) ? -1 : 1;
 }
 
-bool hasOnlyLeftSensors(uint8_t active_mask) {
-  return ((active_mask & 0x03U) != 0U) && ((active_mask & 0x0CU) == 0U);
+constexpr uint8_t kLeftSensorMask = 0x01U;
+constexpr uint8_t kCenterSensorMask = 0x02U;
+constexpr uint8_t kRightSensorMask = 0x04U;
+
+bool isLeftActive(uint8_t active_mask) {
+  return (active_mask & kLeftSensorMask) != 0U;
 }
 
-bool hasOnlyRightSensors(uint8_t active_mask) {
-  return ((active_mask & 0x0CU) != 0U) && ((active_mask & 0x03U) == 0U);
+bool isCenterActive(uint8_t active_mask) {
+  return (active_mask & kCenterSensorMask) != 0U;
 }
 
-bool isOuterEdgeOnly(uint8_t active_mask) {
-  return (active_mask == 0x01U) || (active_mask == 0x08U);
+bool isRightActive(uint8_t active_mask) {
+  return (active_mask & kRightSensorMask) != 0U;
+}
+
+bool hasLeftBias(uint8_t active_mask) {
+  return isLeftActive(active_mask) && !isRightActive(active_mask);
+}
+
+bool hasRightBias(uint8_t active_mask) {
+  return isRightActive(active_mask) && !isLeftActive(active_mask);
+}
+
+bool isEdgeOnlyDetection(uint8_t active_mask) {
+  return active_mask == kLeftSensorMask || active_mask == kRightSensorMask;
 }
 
 int8_t chooseDirection(const ControlContext *ctx, const ControlEstimate *estimate) {
@@ -47,10 +63,10 @@ int8_t chooseDirection(const ControlContext *ctx, const ControlEstimate *estimat
     return position_direction;
   }
 
-  if (hasOnlyLeftSensors(estimate->active_mask)) {
+  if (hasLeftBias(estimate->active_mask)) {
     return -1;
   }
-  if (hasOnlyRightSensors(estimate->active_mask)) {
+  if (hasRightBias(estimate->active_mask)) {
     return 1;
   }
 
@@ -205,9 +221,10 @@ ControlOutput controlCompute(ControlContext *ctx, const ControlEstimate *estimat
   }
 
   if (state == BOT_LINE_LOST || !estimate->line_present) {
+    const int8_t search_direction = fallbackDirection(ctx->last_direction);
     output.error = ctx->last_valid_position;
-    output.motion_command.direction = 0;
-    output.motion_command.primitive = MOTION_STOP;
+    output.motion_command.direction = search_direction;
+    output.motion_command.primitive = MOTION_ROTATE;
     if (output.motion_command.primitive != ctx->last_motion) {
       ctx->last_motion = output.motion_command.primitive;
       ctx->last_motion_change_ms = now_ms;
@@ -227,18 +244,21 @@ ControlOutput controlCompute(ControlContext *ctx, const ControlEstimate *estimat
   output.motion_command.direction = direction;
 
   MotionPrimitive desired_motion = MOTION_FORWARD;
-  const bool stay_in_forward = (ctx->last_motion == MOTION_FORWARD) &&
-                               (abs_position <= ctx->config.center_exit_threshold);
-  const bool enter_forward = abs_position <= ctx->config.center_enter_threshold;
+  const bool center_active = isCenterActive(estimate->active_mask);
+  const bool edge_only_detection = isEdgeOnlyDetection(estimate->active_mask);
+  const bool stay_in_forward =
+      center_active && (ctx->last_motion == MOTION_FORWARD) &&
+      (abs_position <= ctx->config.center_exit_threshold);
+  const bool enter_forward =
+      center_active && (abs_position <= ctx->config.center_enter_threshold);
 
   if (stay_in_forward || enter_forward) {
     desired_motion = MOTION_FORWARD;
     output.motion_command.direction = 0;
+  } else if (!center_active && (edge_only_detection || abs_position >= ctx->config.rotate_threshold)) {
+    desired_motion = MOTION_ROTATE;
   } else {
-    desired_motion =
-        (isOuterEdgeOnly(estimate->active_mask) || abs_position >= ctx->config.rotate_threshold)
-            ? MOTION_ROTATE
-            : MOTION_ARC;
+    desired_motion = MOTION_ARC;
   }
 
   output.motion_command.primitive = holdMotion(ctx, desired_motion, now_ms);

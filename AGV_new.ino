@@ -24,36 +24,38 @@ constexpr uint16_t kI2cFailureCooldownMs = 20U;
 constexpr uint8_t kI2cMaxConsecutiveFailures = 2U;
 
 constexpr uint16_t kControlLoopMs = 10;
+constexpr uint16_t kCalibrationWarmupMs = 1200;
 constexpr uint16_t kCalibrationSamples = 130;
 constexpr uint16_t kCalibrationSampleDelayMs = 4;
 constexpr uint32_t kDebugIntervalMs = 200;
 
-constexpr float kFilterAlpha = 0.7f;
-constexpr float kSignalFloor = 5.0f;
-// Replace these with measured "strong on tape" magnitudes for each sensor.
-constexpr float kObservedStrongOnTape[SENSOR_COUNT] = {16.0f, 48.0f, 23.0f, 12.0f};
-constexpr float kSignalHeadroomPercent = 0.20f;
-constexpr float kMinSensorMax = 0.001f;
+constexpr float kFilterAlpha = 0.25f;
+constexpr float kSignalFloor = 10.0f;
+constexpr float kSignalActivateThreshold = 18.0f;
+constexpr float kSignalDeactivateThreshold = 10.0f;
+constexpr float kBaselineFollowAlpha = 0.0025f;
+// Apply sensor correction once in the signal pipeline.
+constexpr float kSensorScale[SENSOR_COUNT] = {1.000f, 0.490f, 0.510f};
 
 constexpr int16_t kPwmMax = 4095;
 constexpr int16_t MOTOR_PWM = 1500;
 
-constexpr float kConfidenceTotalRef = 240.0f;
-constexpr float kConfidencePeakRef = 120.0f;
-constexpr float kConfidenceTrackingThreshold = 0.55f;
-constexpr float kConfidenceLostThreshold = 0.14f;
-constexpr float kPositionFilterAlpha = 0.25f;
-constexpr float kCenterEnterThreshold = 0.28f;
-constexpr float kCenterExitThreshold = 0.42f;
-constexpr float kRotateThreshold = 1.25f;
-constexpr uint16_t kDirectionHoldMs = 50;
-constexpr uint16_t kMotionHoldMs = 90;
+constexpr float kConfidenceTotalRef = 150.0f;
+constexpr float kConfidencePeakRef = 90.0f;
+constexpr float kConfidenceTrackingThreshold = 0.35f;
+constexpr float kConfidenceLostThreshold = 0.10f;
+constexpr float kPositionFilterAlpha = 0.55f;
+constexpr float kCenterEnterThreshold = 0.18f;
+constexpr float kCenterExitThreshold = 0.40f;
+constexpr float kRotateThreshold = 0.80f;
+constexpr uint16_t kDirectionHoldMs = 20;
+constexpr uint16_t kMotionHoldMs = 30;
 constexpr uint8_t kLinePresentConfirmCount = 3;
 constexpr uint8_t kLineLostConfirmCount = 3;
 
 // Keep this array aligned with the physical left-to-right sensor order.
 // To reverse the sensor order later, only swap these positions.
-constexpr float kSensorPositions[SENSOR_COUNT] = {-1.5f, -0.5f, 0.5f, 1.5f};
+constexpr float kSensorPositions[SENSOR_COUNT] = {-2.0f, 0.0f, 2.0f};
 
 constexpr bool FL_REVERSED = false;
 constexpr bool FR_REVERSED = false;
@@ -82,27 +84,15 @@ static uint32_t g_last_debug_ms = 0U;
 static bool g_init_ok = false;
 static bool g_calibration_done = false;
 
-static float deriveSensorMax(float observed_strong_on_tape,
-                             float headroom_percent,
-                             float min_sensor_max) {
-  const float sensor_max = observed_strong_on_tape * (1.0f + headroom_percent);
-  return (sensor_max > min_sensor_max) ? sensor_max : min_sensor_max;
-}
-
 static SensorReadConfig makeSensorConfig() {
   SensorReadConfig config;
   config.i2c_address = AppConfig::kAds1115Address;
   config.gain = GAIN_ONE;
   config.filter_alpha = AppConfig::kFilterAlpha;
-  config.common_mode_rejection = true;
   config.signal_floor = AppConfig::kSignalFloor;
-  config.headroom_percent = AppConfig::kSignalHeadroomPercent;
-  config.min_sensor_max = AppConfig::kMinSensorMax;
-  for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
-    config.observed_strong_on_tape[i] = AppConfig::kObservedStrongOnTape[i];
-    config.sensor_max[i] =
-        deriveSensorMax(config.observed_strong_on_tape[i], config.headroom_percent, config.min_sensor_max);
-  }
+  config.signal_activate_threshold = AppConfig::kSignalActivateThreshold;
+  config.signal_deactivate_threshold = AppConfig::kSignalDeactivateThreshold;
+  config.baseline_follow_alpha = AppConfig::kBaselineFollowAlpha;
   return config;
 }
 
@@ -228,7 +218,7 @@ static void printRateLimitedDebug(const SensorProcessedData &sensor_data,
       Serial.print(", ");
     }
   }
-  Serial.print("] scaledSig=[");
+  Serial.print("] ctrlSig=[");
   for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
     Serial.print(sensor_data.scaled_signal[i], 1);
     if (i + 1U < SENSOR_COUNT) {
@@ -241,6 +231,7 @@ static void printRateLimitedDebug(const SensorProcessedData &sensor_data,
 static bool performStartupCalibration() {
   motorDriveStopAll(&g_motor_ctx);
   sensorReadResetFilters(&g_sensor_ctx);
+  delay(AppConfig::kCalibrationWarmupMs);
 
   CalibrationSamplerContext sampler = {&g_sensor_ctx};
   const bool calibrated = calibrationRunBaseline(&g_calibration,
@@ -251,9 +242,18 @@ static bool performStartupCalibration() {
 
   sensorReadResetFilters(&g_sensor_ctx);
   if (calibrated) {
+    calibrationSetScale(&g_calibration, AppConfig::kSensorScale);
     Serial.print("baseline=[");
     for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
       Serial.print(g_calibration.baseline[i], 1);
+      if (i + 1U < SENSOR_COUNT) {
+        Serial.print(", ");
+      }
+    }
+    Serial.println("]");
+    Serial.print("sensor_scale=[");
+    for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
+      Serial.print(g_calibration.scale[i], 3);
       if (i + 1U < SENSOR_COUNT) {
         Serial.print(", ");
       }
@@ -283,15 +283,21 @@ void setup() {
   Serial.println(AppConfig::kI2cClockHz);
   Serial.print("motor_pwm=");
   Serial.println(AppConfig::MOTOR_PWM);
+  Serial.print("warmup_ms=");
+  Serial.println(AppConfig::kCalibrationWarmupMs);
+  Serial.print("signal_hysteresis=");
+  Serial.print(AppConfig::kSignalActivateThreshold, 1);
+  Serial.print("/");
+  Serial.println(AppConfig::kSignalDeactivateThreshold, 1);
 
   g_sensor_config = makeSensorConfig();
   g_motor_config = makeMotorConfig();
   g_control_config = makeControlConfig();
   g_state_config = makeStateConfig();
 
-  Serial.print("sensor_max=[");
+  Serial.print("sensor_scale=[");
   for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
-    Serial.print(g_sensor_config.sensor_max[i], 2);
+    Serial.print(AppConfig::kSensorScale[i], 3);
     if (i + 1U < SENSOR_COUNT) {
       Serial.print(", ");
     }

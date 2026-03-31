@@ -23,8 +23,8 @@ bool calibrationRunBaseline(CalibrationData *data,
     return false;
   }
 
-  float sums[SENSOR_COUNT] = {0.0f, 0.0f, 0.0f, 0.0f};
-  int16_t sample[SENSOR_COUNT] = {0, 0, 0, 0};
+  float sums[SENSOR_COUNT] = {0.0f, 0.0f, 0.0f};
+  int16_t sample[SENSOR_COUNT] = {0, 0, 0};
 
   calibrationReset(data);
 
