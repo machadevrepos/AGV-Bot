@@ -24,6 +24,7 @@ struct ControlConfig {
 
 struct ControlEstimate {
   float position;
+  float sensed_position;
   float error;
   float confidence;
   float total_signal;
@@ -31,6 +32,7 @@ struct ControlEstimate {
   bool line_present;
   bool line_strong;
   uint8_t active_mask;
+  uint8_t sensed_mask;
 };
 
 struct ControlOutput {

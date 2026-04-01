@@ -35,23 +35,23 @@ constexpr float kSignalActivateThreshold = 18.0f;
 constexpr float kSignalDeactivateThreshold = 10.0f;
 constexpr float kBaselineFollowAlpha = 0.0025f;
 // Apply sensor correction once in the signal pipeline.
-constexpr float kSensorScale[SENSOR_COUNT] = {1.000f, 0.490f, 0.510f};
+constexpr float kSensorScale[SENSOR_COUNT] = {1.000f, 0.480f, 0.495f};
 
 constexpr int16_t kPwmMax = 4095;
-constexpr int16_t MOTOR_PWM = 1500;
+constexpr int16_t MOTOR_PWM = 2000;
 
 constexpr float kConfidenceTotalRef = 150.0f;
 constexpr float kConfidencePeakRef = 90.0f;
-constexpr float kConfidenceTrackingThreshold = 0.35f;
-constexpr float kConfidenceLostThreshold = 0.10f;
-constexpr float kPositionFilterAlpha = 0.55f;
-constexpr float kCenterEnterThreshold = 0.18f;
-constexpr float kCenterExitThreshold = 0.40f;
-constexpr float kRotateThreshold = 0.80f;
-constexpr uint16_t kDirectionHoldMs = 20;
-constexpr uint16_t kMotionHoldMs = 30;
+constexpr float kConfidenceTrackingThreshold = 0.25f;
+constexpr float kConfidenceLostThreshold = 0.04f;
+constexpr float kPositionFilterAlpha = 0.85;
+constexpr float kCenterEnterThreshold = 0.25;
+constexpr float kCenterExitThreshold = 0.50;
+constexpr float kRotateThreshold = 0.60f;
+constexpr uint16_t kDirectionHoldMs = 10;
+constexpr uint16_t kMotionHoldMs = 10;
 constexpr uint8_t kLinePresentConfirmCount = 3;
-constexpr uint8_t kLineLostConfirmCount = 3;
+constexpr uint8_t kLineLostConfirmCount = 5;
 
 // Keep this array aligned with the physical left-to-right sensor order.
 // To reverse the sensor order later, only swap these positions.

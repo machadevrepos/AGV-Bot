@@ -16,17 +16,35 @@ float clampFloat(float value, float min_value, float max_value) {
 }
 
 int8_t directionFromPosition(float value) {
-  if (value > 0.10f) {
+  if (value > 0.5) {
     return 1;
   }
-  if (value < -0.10f) {
+  if (value < -0.5) {
     return -1;
   }
   return 0;
 }
 
-int8_t fallbackDirection(int8_t last_direction) {
-  return (last_direction < 0) ? -1 : 1;
+int8_t fallbackDirection(const ControlContext *ctx) {
+  if (ctx == nullptr) {
+    return 0;
+  }
+
+  if (ctx->last_direction < 0) {
+    return -1;
+  }
+  if (ctx->last_direction > 0) {
+    return 1;
+  }
+
+  if (ctx->last_valid_position < 0.0f) {
+    return -1;
+  }
+  if (ctx->last_valid_position > 0.0f) {
+    return 1;
+  }
+
+  return 0;
 }
 
 constexpr uint8_t kLeftSensorMask = 0x01U;
@@ -70,7 +88,19 @@ int8_t chooseDirection(const ControlContext *ctx, const ControlEstimate *estimat
     return 1;
   }
 
-  return fallbackDirection(ctx->last_direction);
+  const int8_t sensed_position_direction = directionFromPosition(estimate->sensed_position);
+  if (sensed_position_direction != 0) {
+    return sensed_position_direction;
+  }
+
+  if (hasLeftBias(estimate->sensed_mask)) {
+    return -1;
+  }
+  if (hasRightBias(estimate->sensed_mask)) {
+    return 1;
+  }
+
+  return fallbackDirection(ctx);
 }
 
 MotionPrimitive holdMotion(const ControlContext *ctx,
@@ -106,7 +136,7 @@ void controlInit(ControlContext *ctx, const ControlConfig *config) {
   ctx->last_motion_change_ms = 0U;
   ctx->filter_seeded = false;
   ctx->line_seen_once = false;
-  ctx->last_direction = 1;
+  ctx->last_direction = 0;
   ctx->last_motion = MOTION_STOP;
 }
 
@@ -121,7 +151,7 @@ void controlReset(ControlContext *ctx) {
   ctx->last_motion_change_ms = 0U;
   ctx->filter_seeded = false;
   ctx->line_seen_once = false;
-  ctx->last_direction = 1;
+  ctx->last_direction = 0;
   ctx->last_motion = MOTION_STOP;
 }
 
@@ -145,6 +175,14 @@ void controlEstimateLine(const ControlContext *ctx, const SensorProcessedData *s
     local_estimate.position = weighted_sum / sensor_data->scaled_total_signal;
   }
 
+  if (sensor_data->total_signal > 0.0f) {
+    float sensed_weighted_sum = 0.0f;
+    for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
+      sensed_weighted_sum += sensor_data->signal[i] * ctx->config.sensor_positions[i];
+    }
+    local_estimate.sensed_position = sensed_weighted_sum / sensor_data->total_signal;
+  }
+
   const float total_component =
       clampFloat(sensor_data->scaled_total_signal / ctx->config.confidence_total_ref, 0.0f, 1.0f);
   const float peak_component =
@@ -158,6 +196,9 @@ void controlEstimateLine(const ControlContext *ctx, const SensorProcessedData *s
   for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
     if (sensor_data->scaled_signal[i] > 0.0f) {
       local_estimate.active_mask |= static_cast<uint8_t>(1U << i);
+    }
+    if (sensor_data->signal[i] > 0.0f) {
+      local_estimate.sensed_mask |= static_cast<uint8_t>(1U << i);
     }
   }
 
@@ -221,10 +262,10 @@ ControlOutput controlCompute(ControlContext *ctx, const ControlEstimate *estimat
   }
 
   if (state == BOT_LINE_LOST || !estimate->line_present) {
-    const int8_t search_direction = fallbackDirection(ctx->last_direction);
+    const int8_t search_direction = chooseDirection(ctx, estimate);
     output.error = ctx->last_valid_position;
     output.motion_command.direction = search_direction;
-    output.motion_command.primitive = MOTION_ROTATE;
+    output.motion_command.primitive = (search_direction == 0) ? MOTION_STOP : MOTION_ROTATE;
     if (output.motion_command.primitive != ctx->last_motion) {
       ctx->last_motion = output.motion_command.primitive;
       ctx->last_motion_change_ms = now_ms;
