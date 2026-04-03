@@ -7,6 +7,7 @@
 #include "i2c_bus.h"
 #include "motor_drive.h"
 #include "sensor_read.h"
+#include "UltrasonicManager.h"
 
 namespace AppConfig {
 
@@ -24,6 +25,11 @@ constexpr uint16_t kI2cFailureCooldownMs = 20U;
 constexpr uint8_t kI2cMaxConsecutiveFailures = 2U;
 
 constexpr uint16_t kControlLoopMs = 10;
+constexpr uint16_t kUltrasonicMeasurementIntervalMs = 50;
+constexpr uint32_t kUltrasonicEchoTimeoutUs = 25000U;
+constexpr float kUltrasonicObstacleThresholdCm = 30.0f;
+constexpr float kUltrasonicMinDistanceCm = 2.0f;
+constexpr float kUltrasonicMaxDistanceCm = 300.0f;
 constexpr uint16_t kCalibrationWarmupMs = 1200;
 constexpr uint16_t kCalibrationSamples = 130;
 constexpr uint16_t kCalibrationSampleDelayMs = 4;
@@ -62,6 +68,12 @@ constexpr bool FR_REVERSED = false;
 constexpr bool RL_REVERSED = false;
 constexpr bool RR_REVERSED = false;
 
+constexpr uint8_t kUltrasonicTrigPin = 4;
+constexpr uint8_t kUltrasonicFrontEchoPin = 20;
+constexpr uint8_t kUltrasonicBackEchoPin = 21;
+constexpr uint8_t kUltrasonicRightEchoPin = 45;
+constexpr uint8_t kUltrasonicLeftEchoPin = 48;
+
 }  // namespace AppConfig
 
 struct CalibrationSamplerContext {
@@ -74,15 +86,18 @@ static MotorDriveContext g_motor_ctx;
 static BotStateMachine g_state_machine;
 static ControlContext g_control_ctx;
 static I2cBusContext g_i2c_bus;
+static UltrasonicManagerContext g_ultrasonic_ctx;
 static SensorReadConfig g_sensor_config;
 static MotorDriveConfig g_motor_config;
 static ControlConfig g_control_config;
 static BotStateConfig g_state_config;
+static UltrasonicManagerConfig g_ultrasonic_config;
 
 static uint32_t g_last_loop_ms = 0U;
 static uint32_t g_last_debug_ms = 0U;
 static bool g_init_ok = false;
 static bool g_calibration_done = false;
+static bool g_ultrasonic_ok = false;
 
 static SensorReadConfig makeSensorConfig() {
   SensorReadConfig config;
@@ -145,6 +160,21 @@ static I2cBusConfig makeI2cBusConfig() {
   return config;
 }
 
+static UltrasonicManagerConfig makeUltrasonicConfig() {
+  UltrasonicManagerConfig config = {};
+  config.trigger_pin = AppConfig::kUltrasonicTrigPin;
+  config.echo_pins[ULTRASONIC_SENSOR_FRONT] = AppConfig::kUltrasonicFrontEchoPin;
+  config.echo_pins[ULTRASONIC_SENSOR_BACK] = AppConfig::kUltrasonicBackEchoPin;
+  config.echo_pins[ULTRASONIC_SENSOR_RIGHT] = AppConfig::kUltrasonicRightEchoPin;
+  config.echo_pins[ULTRASONIC_SENSOR_LEFT] = AppConfig::kUltrasonicLeftEchoPin;
+  config.measurement_interval_ms = AppConfig::kUltrasonicMeasurementIntervalMs;
+  config.echo_timeout_us = AppConfig::kUltrasonicEchoTimeoutUs;
+  config.obstacle_threshold_cm = AppConfig::kUltrasonicObstacleThresholdCm;
+  config.min_valid_distance_cm = AppConfig::kUltrasonicMinDistanceCm;
+  config.max_valid_distance_cm = AppConfig::kUltrasonicMaxDistanceCm;
+  return config;
+}
+
 static BotStateConfig makeStateConfig() {
   BotStateConfig config = {};
   config.line_present_confirm_count = AppConfig::kLinePresentConfirmCount;
@@ -170,10 +200,24 @@ static bool sampleCalibrationFrame(void *user_context, int16_t out_values[SENSOR
   return true;
 }
 
+static void printUltrasonicDistanceLabel(const UltrasonicManagerContext *ultrasonic_ctx,
+                                         UltrasonicSensorId sensor_id) {
+  const float distance_cm = ultrasonicManagerGetDistanceCm(ultrasonic_ctx, sensor_id);
+  if (distance_cm < 0.0f) {
+    Serial.print("invalid");
+    return;
+  }
+
+  Serial.print(distance_cm, 1);
+  Serial.print("cm");
+}
+
 static void printRateLimitedDebug(const SensorProcessedData &sensor_data,
                                   const ControlEstimate &estimate,
                                   const ControlOutput &output,
                                   const MecanumWheelPwm &wheel_pwm,
+                                  const UltrasonicManagerContext *ultrasonic_ctx,
+                                  bool ultrasonic_ok,
                                   BotState state,
                                   uint32_t now_ms) {
   if ((now_ms - g_last_debug_ms) < AppConfig::kDebugIntervalMs) {
@@ -226,6 +270,22 @@ static void printRateLimitedDebug(const SensorProcessedData &sensor_data,
     }
   }
   Serial.println("]");
+
+  if (!ultrasonic_ok || ultrasonic_ctx == nullptr) {
+    return;
+  }
+
+  Serial.print("ultrasound front=");
+  printUltrasonicDistanceLabel(ultrasonic_ctx, ULTRASONIC_SENSOR_FRONT);
+  Serial.print(" blocked=");
+  Serial.print(ultrasonicManagerIsFrontObstacleDetected(ultrasonic_ctx) ? "YES" : "NO");
+  Serial.print(" back=");
+  printUltrasonicDistanceLabel(ultrasonic_ctx, ULTRASONIC_SENSOR_BACK);
+  Serial.print(" right=");
+  printUltrasonicDistanceLabel(ultrasonic_ctx, ULTRASONIC_SENSOR_RIGHT);
+  Serial.print(" left=");
+  printUltrasonicDistanceLabel(ultrasonic_ctx, ULTRASONIC_SENSOR_LEFT);
+  Serial.println();
 }
 
 static bool performStartupCalibration() {
@@ -294,6 +354,7 @@ void setup() {
   g_motor_config = makeMotorConfig();
   g_control_config = makeControlConfig();
   g_state_config = makeStateConfig();
+  g_ultrasonic_config = makeUltrasonicConfig();
 
   Serial.print("sensor_scale=[");
   for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
@@ -310,6 +371,7 @@ void setup() {
 
   const bool ads_ok = i2c_ok && sensorReadInit(&g_sensor_ctx, &g_sensor_config, &g_i2c_bus);
   const bool pca_ok = i2c_ok && motorDriveInit(&g_motor_ctx, &g_motor_config, &g_i2c_bus);
+  g_ultrasonic_ok = ultrasonicManagerInit(&g_ultrasonic_ctx, &g_ultrasonic_config);
   g_init_ok = i2c_ok && ads_ok && pca_ok;
 
   if (!i2c_ok) {
@@ -320,6 +382,9 @@ void setup() {
   }
   if (!pca_ok) {
     Serial.println("pca_init_failed");
+  }
+  if (!g_ultrasonic_ok) {
+    Serial.println("ultrasonic_init_failed");
   }
 
   if (!g_init_ok) {
@@ -350,6 +415,10 @@ void loop() {
     return;
   }
   g_last_loop_ms = now_ms;
+
+  if (g_ultrasonic_ok) {
+    ultrasonicManagerUpdate(&g_ultrasonic_ctx, now_ms);
+  }
 
   if (!g_init_ok || g_state_machine.current_state == BOT_ERROR) {
     motorDriveStopAll(&g_motor_ctx);
@@ -383,10 +452,19 @@ void loop() {
   state_inputs.now_ms = now_ms;
 
   const BotState state = botStateUpdate(&g_state_machine, &g_state_config, &state_inputs);
-  const ControlOutput output = controlCompute(&g_control_ctx, &estimate, state, now_ms);
+  ControlOutput output = controlCompute(&g_control_ctx, &estimate, state, now_ms);
+
+  // The ultrasonic module stays independent. Main loop only gates the outgoing
+  // motor command so future back/right/left reactions can be added the same way.
+  if (g_ultrasonic_ok && ultrasonicManagerIsFrontObstacleDetected(&g_ultrasonic_ctx)) {
+    output.motion_command.primitive = MOTION_STOP;
+    output.motion_command.direction = 0;
+  }
+
   const MecanumWheelPwm wheel_pwm = motorDriveApplyCommand(&g_motor_ctx, &output.motion_command);
 
-  printRateLimitedDebug(processed_frame, estimate, output, wheel_pwm, state, now_ms);
+  printRateLimitedDebug(
+      processed_frame, estimate, output, wheel_pwm, &g_ultrasonic_ctx, g_ultrasonic_ok, state, now_ms);
 }
 
 
