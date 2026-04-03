@@ -38,16 +38,16 @@ constexpr float kBaselineFollowAlpha = 0.0025f;
 constexpr float kSensorScale[SENSOR_COUNT] = {1.000f, 0.480f, 0.495f};
 
 constexpr int16_t kPwmMax = 4095;
-constexpr int16_t MOTOR_PWM = 2000;
+constexpr int16_t MOTOR_PWM = 2500;
 
 constexpr float kConfidenceTotalRef = 150.0f;
 constexpr float kConfidencePeakRef = 90.0f;
 constexpr float kConfidenceTrackingThreshold = 0.25f;
 constexpr float kConfidenceLostThreshold = 0.04f;
-constexpr float kPositionFilterAlpha = 0.85;
-constexpr float kCenterEnterThreshold = 0.25;
-constexpr float kCenterExitThreshold = 0.50;
-constexpr float kRotateThreshold = 0.60f;
+constexpr float kPositionFilterAlpha = 0.950;
+constexpr float kCenterEnterThreshold = 0.4;
+constexpr float kCenterExitThreshold = 0.7;
+constexpr float kRotateThreshold = 1.0f;
 constexpr uint16_t kDirectionHoldMs = 10;
 constexpr uint16_t kMotionHoldMs = 10;
 constexpr uint8_t kLinePresentConfirmCount = 3;
