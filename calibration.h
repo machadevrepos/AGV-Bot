@@ -21,7 +21,5 @@ bool calibrationRunBaseline(CalibrationData *data,
                             uint16_t sample_count,
                             uint16_t sample_delay_ms);
 void calibrationSetScale(CalibrationData *data, const float scale[SENSOR_COUNT]);
-const float *calibrationGetBaseline(const CalibrationData *data);
-const float *calibrationGetScale(const CalibrationData *data);
 
 #endif

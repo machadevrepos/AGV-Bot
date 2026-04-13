@@ -62,11 +62,3 @@ void calibrationSetScale(CalibrationData *data, const float scale[SENSOR_COUNT])
     data->scale[i] = (scale[i] > 0.0f) ? scale[i] : 1.0f;
   }
 }
-
-const float *calibrationGetBaseline(const CalibrationData *data) {
-  return (data != nullptr) ? data->baseline : nullptr;
-}
-
-const float *calibrationGetScale(const CalibrationData *data) {
-  return (data != nullptr) ? data->scale : nullptr;
-}

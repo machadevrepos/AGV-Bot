@@ -71,10 +71,6 @@ bool hasRightBias(uint8_t active_mask) {
   return isRightActive(active_mask) && !isLeftActive(active_mask);
 }
 
-bool isEdgeOnlyDetection(uint8_t active_mask) {
-  return active_mask == kLeftSensorMask || active_mask == kRightSensorMask;
-}
-
 int8_t chooseDirection(const ControlContext *ctx, const ControlEstimate *estimate) {
   const int8_t position_direction = directionFromPosition(estimate->position);
   if (position_direction != 0) {
@@ -88,37 +84,7 @@ int8_t chooseDirection(const ControlContext *ctx, const ControlEstimate *estimat
     return 1;
   }
 
-  const int8_t sensed_position_direction = directionFromPosition(estimate->sensed_position);
-  if (sensed_position_direction != 0) {
-    return sensed_position_direction;
-  }
-
-  if (hasLeftBias(estimate->sensed_mask)) {
-    return -1;
-  }
-  if (hasRightBias(estimate->sensed_mask)) {
-    return 1;
-  }
-
   return fallbackDirection(ctx);
-}
-
-MotionPrimitive holdMotion(const ControlContext *ctx,
-                           MotionPrimitive desired_motion,
-                           uint32_t now_ms) {
-  if (ctx == nullptr) {
-    return desired_motion;
-  }
-
-  if (desired_motion == ctx->last_motion) {
-    return desired_motion;
-  }
-
-  if ((now_ms - ctx->last_motion_change_ms) < ctx->config.motion_hold_ms) {
-    return ctx->last_motion;
-  }
-
-  return desired_motion;
 }
 
 }  // namespace
@@ -132,12 +98,9 @@ void controlInit(ControlContext *ctx, const ControlConfig *config) {
   ctx->config = *config;
   ctx->last_valid_position = 0.0f;
   ctx->filtered_position = 0.0f;
-  ctx->last_direction_change_ms = 0U;
-  ctx->last_motion_change_ms = 0U;
   ctx->filter_seeded = false;
   ctx->line_seen_once = false;
   ctx->last_direction = 0;
-  ctx->last_motion = MOTION_STOP;
 }
 
 void controlReset(ControlContext *ctx) {
@@ -147,12 +110,9 @@ void controlReset(ControlContext *ctx) {
 
   ctx->last_valid_position = 0.0f;
   ctx->filtered_position = 0.0f;
-  ctx->last_direction_change_ms = 0U;
-  ctx->last_motion_change_ms = 0U;
   ctx->filter_seeded = false;
   ctx->line_seen_once = false;
   ctx->last_direction = 0;
-  ctx->last_motion = MOTION_STOP;
 }
 
 void controlEstimateLine(const ControlContext *ctx, const SensorProcessedData *sensor_data, ControlEstimate *estimate) {
@@ -162,25 +122,13 @@ void controlEstimateLine(const ControlContext *ctx, const SensorProcessedData *s
 
   ControlEstimate local_estimate;
   memset(&local_estimate, 0, sizeof(local_estimate));
-  local_estimate.total_signal = sensor_data->scaled_total_signal;
-  local_estimate.peak_signal = sensor_data->scaled_peak_signal;
 
-  // Weighted centroid uses all sensor magnitudes together, so one active sensor or
-  // two partially active adjacent sensors both map to a smooth continuous position.
   if (sensor_data->scaled_total_signal > 0.0f) {
     float weighted_sum = 0.0f;
     for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
       weighted_sum += sensor_data->scaled_signal[i] * ctx->config.sensor_positions[i];
     }
     local_estimate.position = weighted_sum / sensor_data->scaled_total_signal;
-  }
-
-  if (sensor_data->total_signal > 0.0f) {
-    float sensed_weighted_sum = 0.0f;
-    for (uint8_t i = 0; i < SENSOR_COUNT; ++i) {
-      sensed_weighted_sum += sensor_data->signal[i] * ctx->config.sensor_positions[i];
-    }
-    local_estimate.sensed_position = sensed_weighted_sum / sensor_data->total_signal;
   }
 
   const float total_component =
@@ -197,15 +145,12 @@ void controlEstimateLine(const ControlContext *ctx, const SensorProcessedData *s
     if (sensor_data->scaled_signal[i] > 0.0f) {
       local_estimate.active_mask |= static_cast<uint8_t>(1U << i);
     }
-    if (sensor_data->signal[i] > 0.0f) {
-      local_estimate.sensed_mask |= static_cast<uint8_t>(1U << i);
-    }
   }
 
   *estimate = local_estimate;
 }
 
-ControlOutput controlCompute(ControlContext *ctx, const ControlEstimate *estimate, BotState state, uint32_t now_ms) {
+ControlOutput controlCompute(ControlContext *ctx, const ControlEstimate *estimate, BotState state) {
   ControlOutput output;
   memset(&output, 0, sizeof(output));
 
@@ -245,72 +190,37 @@ ControlOutput controlCompute(ControlContext *ctx, const ControlEstimate *estimat
 
     const int8_t seen_direction = chooseDirection(ctx, &smoothed_estimate);
     if (seen_direction != 0) {
-      const bool direction_changed = (seen_direction != ctx->last_direction);
-      if (direction_changed &&
-          (now_ms - ctx->last_direction_change_ms) >= ctx->config.direction_hold_ms) {
-        ctx->last_direction = seen_direction;
-        ctx->last_direction_change_ms = now_ms;
-      } else if (!direction_changed) {
-        ctx->last_direction_change_ms = now_ms;
-      }
+      ctx->last_direction = seen_direction;
     }
   }
 
-  // Stay stopped after power-on until the stripe has been detected once.
   if (!ctx->line_seen_once) {
     return output;
   }
 
-  if (state == BOT_LINE_LOST || !estimate->line_present) {
+  if (state == BOT_ROTATE || !estimate->line_present) {
     const int8_t search_direction = chooseDirection(ctx, estimate);
     output.error = ctx->last_valid_position;
     output.motion_command.direction = search_direction;
     output.motion_command.primitive = (search_direction == 0) ? MOTION_STOP : MOTION_ROTATE;
-    if (output.motion_command.primitive != ctx->last_motion) {
-      ctx->last_motion = output.motion_command.primitive;
-      ctx->last_motion_change_ms = now_ms;
-    }
     return output;
   }
 
   const float motion_position = ctx->filtered_position;
   const float abs_position = fabsf(motion_position);
-  ControlEstimate smoothed_estimate = *estimate;
-  smoothed_estimate.position = motion_position;
-  smoothed_estimate.error = motion_position;
-
-  const int8_t direction = chooseDirection(ctx, &smoothed_estimate);
   output.position = motion_position;
   output.error = motion_position;
-  output.motion_command.direction = direction;
 
-  MotionPrimitive desired_motion = MOTION_FORWARD;
   const bool center_active = isCenterActive(estimate->active_mask);
-  const bool edge_only_detection = isEdgeOnlyDetection(estimate->active_mask);
-  const bool stay_in_forward =
-      center_active && (ctx->last_motion == MOTION_FORWARD) &&
-      (abs_position <= ctx->config.center_exit_threshold);
-  const bool enter_forward =
-      center_active && (abs_position <= ctx->config.center_enter_threshold);
-
-  if (stay_in_forward || enter_forward) {
-    desired_motion = MOTION_FORWARD;
+  if (center_active && abs_position <= ctx->config.tracking_position_threshold) {
+    output.motion_command.primitive = MOTION_TRACKING;
     output.motion_command.direction = 0;
-  } else if (!center_active && (edge_only_detection || abs_position >= ctx->config.rotate_threshold)) {
-    desired_motion = MOTION_ROTATE;
   } else {
-    desired_motion = MOTION_ARC;
-  }
-
-  output.motion_command.primitive = holdMotion(ctx, desired_motion, now_ms);
-
-  if (output.motion_command.primitive == MOTION_FORWARD) {
-    output.motion_command.direction = 0;
-  }
-
-  if (output.motion_command.primitive != ctx->last_motion) {
-    ctx->last_motion = output.motion_command.primitive;
-    ctx->last_motion_change_ms = now_ms;
+    ControlEstimate smoothed_estimate = *estimate;
+    smoothed_estimate.position = motion_position;
+    smoothed_estimate.error = motion_position;
+    output.motion_command.primitive = MOTION_ROTATE;
+    output.motion_command.direction = chooseDirection(ctx, &smoothed_estimate);
   }
 
   return output;

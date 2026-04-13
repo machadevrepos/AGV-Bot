@@ -7,8 +7,8 @@ void botStateInit(BotStateMachine *machine, uint32_t now_ms) {
 
   machine->current_state = BOT_IDLE;
   machine->state_entry_ms = now_ms;
-  machine->line_present_count = 0U;
-  machine->line_lost_count = 0U;
+  machine->tracking_count = 0U;
+  machine->rotate_count = 0U;
 }
 
 void botStateTransition(BotStateMachine *machine, BotState next_state, uint32_t now_ms) {
@@ -36,41 +36,41 @@ BotState botStateUpdate(BotStateMachine *machine, const BotStateConfig *config, 
 
     case BOT_CALIBRATING:
       if (inputs->calibration_done) {
-        botStateTransition(machine, BOT_LINE_LOST, inputs->now_ms);
-        machine->line_present_count = 0U;
-        machine->line_lost_count = 0U;
+        botStateTransition(machine, BOT_ROTATE, inputs->now_ms);
+        machine->tracking_count = 0U;
+        machine->rotate_count = 0U;
       }
       break;
 
-    case BOT_LINE_PRESENT:
+    case BOT_TRACKING:
       if (inputs->line_present) {
-        machine->line_lost_count = 0U;
+        machine->rotate_count = 0U;
       } else {
-        if (machine->line_lost_count < 255U) {
-          ++machine->line_lost_count;
+        if (machine->rotate_count < 255U) {
+          ++machine->rotate_count;
         }
       }
 
-      if (machine->line_lost_count >= config->line_lost_confirm_count) {
-        botStateTransition(machine, BOT_LINE_LOST, inputs->now_ms);
-        machine->line_present_count = 0U;
-        machine->line_lost_count = 0U;
+      if (machine->rotate_count >= config->rotate_confirm_count) {
+        botStateTransition(machine, BOT_ROTATE, inputs->now_ms);
+        machine->tracking_count = 0U;
+        machine->rotate_count = 0U;
       }
       break;
 
-    case BOT_LINE_LOST:
+    case BOT_ROTATE:
       if (inputs->line_strong) {
-        if (machine->line_present_count < 255U) {
-          ++machine->line_present_count;
+        if (machine->tracking_count < 255U) {
+          ++machine->tracking_count;
         }
       } else {
-        machine->line_present_count = 0U;
+        machine->tracking_count = 0U;
       }
 
-      if (machine->line_present_count >= config->line_present_confirm_count) {
-        botStateTransition(machine, BOT_LINE_PRESENT, inputs->now_ms);
-        machine->line_present_count = 0U;
-        machine->line_lost_count = 0U;
+      if (machine->tracking_count >= config->tracking_confirm_count) {
+        botStateTransition(machine, BOT_TRACKING, inputs->now_ms);
+        machine->tracking_count = 0U;
+        machine->rotate_count = 0U;
       }
       break;
 
@@ -87,10 +87,10 @@ const char *botStateName(BotState state) {
       return "IDLE";
     case BOT_CALIBRATING:
       return "CALIBRATING";
-    case BOT_LINE_PRESENT:
-      return "LINE_PRESENT";
-    case BOT_LINE_LOST:
-      return "LINE_LOST";
+    case BOT_TRACKING:
+      return "TRACKING";
+    case BOT_ROTATE:
+      return "ROTATE";
     case BOT_ERROR:
     default:
       return "ERROR";

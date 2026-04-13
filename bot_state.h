@@ -6,14 +6,14 @@
 enum BotState {
   BOT_IDLE = 0,
   BOT_CALIBRATING,
-  BOT_LINE_PRESENT,
-  BOT_LINE_LOST,
+  BOT_TRACKING,
+  BOT_ROTATE,
   BOT_ERROR
 };
 
 struct BotStateConfig {
-  uint8_t line_present_confirm_count;
-  uint8_t line_lost_confirm_count;
+  uint8_t tracking_confirm_count;
+  uint8_t rotate_confirm_count;
 };
 
 struct BotStateInputs {
@@ -21,16 +21,14 @@ struct BotStateInputs {
   bool calibration_done;
   bool line_present;
   bool line_strong;
-  float position;
-  float error;
   uint32_t now_ms;
 };
 
 struct BotStateMachine {
   BotState current_state;
   uint32_t state_entry_ms;
-  uint8_t line_present_count;
-  uint8_t line_lost_count;
+  uint8_t tracking_count;
+  uint8_t rotate_count;
 };
 
 void botStateInit(BotStateMachine *machine, uint32_t now_ms);

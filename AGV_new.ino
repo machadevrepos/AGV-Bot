@@ -38,20 +38,16 @@ constexpr float kBaselineFollowAlpha = 0.0025f;
 constexpr float kSensorScale[SENSOR_COUNT] = {1.000f, 0.480f, 0.495f};
 
 constexpr int16_t kPwmMax = 4095;
-constexpr int16_t MOTOR_PWM = 2500;
+constexpr int16_t MOTOR_PWM = 2000;
 
 constexpr float kConfidenceTotalRef = 150.0f;
 constexpr float kConfidencePeakRef = 90.0f;
 constexpr float kConfidenceTrackingThreshold = 0.25f;
 constexpr float kConfidenceLostThreshold = 0.04f;
 constexpr float kPositionFilterAlpha = 0.950;
-constexpr float kCenterEnterThreshold = 0.4;
-constexpr float kCenterExitThreshold = 0.7;
-constexpr float kRotateThreshold = 1.0f;
-constexpr uint16_t kDirectionHoldMs = 10;
-constexpr uint16_t kMotionHoldMs = 10;
-constexpr uint8_t kLinePresentConfirmCount = 3;
-constexpr uint8_t kLineLostConfirmCount = 5;
+constexpr float kTrackingPositionThreshold = 0.7f;
+constexpr uint8_t kTrackingConfirmCount = 3;
+constexpr uint8_t kRotateConfirmCount = 5;
 
 // Keep this array aligned with the physical left-to-right sensor order.
 // To reverse the sensor order later, only swap these positions.
@@ -123,11 +119,7 @@ static ControlConfig makeControlConfig() {
   config.confidence_tracking_threshold = AppConfig::kConfidenceTrackingThreshold;
   config.confidence_lost_threshold = AppConfig::kConfidenceLostThreshold;
   config.position_filter_alpha = AppConfig::kPositionFilterAlpha;
-  config.center_enter_threshold = AppConfig::kCenterEnterThreshold;
-  config.center_exit_threshold = AppConfig::kCenterExitThreshold;
-  config.rotate_threshold = AppConfig::kRotateThreshold;
-  config.direction_hold_ms = AppConfig::kDirectionHoldMs;
-  config.motion_hold_ms = AppConfig::kMotionHoldMs;
+  config.tracking_position_threshold = AppConfig::kTrackingPositionThreshold;
   return config;
 }
 
@@ -147,8 +139,8 @@ static I2cBusConfig makeI2cBusConfig() {
 
 static BotStateConfig makeStateConfig() {
   BotStateConfig config = {};
-  config.line_present_confirm_count = AppConfig::kLinePresentConfirmCount;
-  config.line_lost_confirm_count = AppConfig::kLineLostConfirmCount;
+  config.tracking_confirm_count = AppConfig::kTrackingConfirmCount;
+  config.rotate_confirm_count = AppConfig::kRotateConfirmCount;
   return config;
 }
 
@@ -340,7 +332,7 @@ void setup() {
   }
 
   controlReset(&g_control_ctx);
-  botStateTransition(&g_state_machine, BOT_LINE_LOST, millis());
+  botStateTransition(&g_state_machine, BOT_ROTATE, millis());
   Serial.println("tracking_ready");
 }
 
@@ -378,12 +370,10 @@ void loop() {
   state_inputs.calibration_done = g_calibration_done;
   state_inputs.line_present = estimate.line_present;
   state_inputs.line_strong = estimate.line_strong;
-  state_inputs.position = estimate.position;
-  state_inputs.error = estimate.error;
   state_inputs.now_ms = now_ms;
 
   const BotState state = botStateUpdate(&g_state_machine, &g_state_config, &state_inputs);
-  const ControlOutput output = controlCompute(&g_control_ctx, &estimate, state, now_ms);
+  const ControlOutput output = controlCompute(&g_control_ctx, &estimate, state);
   const MecanumWheelPwm wheel_pwm = motorDriveApplyCommand(&g_motor_ctx, &output.motion_command);
 
   printRateLimitedDebug(processed_frame, estimate, output, wheel_pwm, state, now_ms);

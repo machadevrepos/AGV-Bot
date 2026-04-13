@@ -12,10 +12,8 @@ struct MotorChannelPair {
 
 enum MotionPrimitive {
   MOTION_STOP = 0,
-  MOTION_FORWARD,
-  MOTION_ARC,
-  MOTION_ROTATE,
-  MOTION_REAR_PIVOT
+  MOTION_TRACKING,
+  MOTION_ROTATE
 };
 
 struct MotionCommand {
@@ -55,10 +53,6 @@ struct MotorDriveContext {
 
 bool motorDriveInit(MotorDriveContext *ctx, const MotorDriveConfig *config, I2cBusContext *bus);
 void motorDriveStopAll(MotorDriveContext *ctx);
-bool motorDriveWriteChannel(MotorDriveContext *ctx, uint8_t channel, uint16_t pwm_value);
-int16_t motorDriveClamp(const MotorDriveContext *ctx, int16_t pwm_value);
-bool motorDriveDriveMotor(MotorDriveContext *ctx, uint8_t forward_channel, uint8_t reverse_channel, int16_t pwm_value);
-MecanumWheelPwm motorDriveApplyMotion(MotorDriveContext *ctx, MotionPrimitive primitive, int8_t direction);
 MecanumWheelPwm motorDriveApplyCommand(MotorDriveContext *ctx, const MotionCommand *command);
 const char *motionPrimitiveName(MotionPrimitive primitive);
 

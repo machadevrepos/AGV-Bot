@@ -23,6 +23,20 @@ int16_t directionToPwm(const MotorDriveContext *ctx, int8_t direction, bool reve
   return (final_direction > 0) ? ctx->config.motor_pwm : static_cast<int16_t>(-ctx->config.motor_pwm);
 }
 
+int16_t clampPwm(const MotorDriveContext *ctx, int16_t pwm_value) {
+  if (ctx == nullptr) {
+    return 0;
+  }
+
+  if (pwm_value > ctx->config.pwm_max) {
+    return ctx->config.pwm_max;
+  }
+  if (pwm_value < -ctx->config.pwm_max) {
+    return -ctx->config.pwm_max;
+  }
+  return pwm_value;
+}
+
 MecanumWheelPwm makeWheelPwm(const MotorDriveContext *ctx,
                              int8_t fl_direction,
                              int8_t fr_direction,
@@ -35,13 +49,13 @@ MecanumWheelPwm makeWheelPwm(const MotorDriveContext *ctx,
     return wheel_pwm;
   }
 
-  wheel_pwm.front_left = motorDriveClamp(
+  wheel_pwm.front_left = clampPwm(
       ctx, directionToPwm(ctx, fl_direction, ctx->config.front_left_reversed));
-  wheel_pwm.front_right = motorDriveClamp(
+  wheel_pwm.front_right = clampPwm(
       ctx, directionToPwm(ctx, fr_direction, ctx->config.front_right_reversed));
-  wheel_pwm.rear_left = motorDriveClamp(
+  wheel_pwm.rear_left = clampPwm(
       ctx, directionToPwm(ctx, rl_direction, ctx->config.rear_left_reversed));
-  wheel_pwm.rear_right = motorDriveClamp(
+  wheel_pwm.rear_right = clampPwm(
       ctx, directionToPwm(ctx, rr_direction, ctx->config.rear_right_reversed));
   return wheel_pwm;
 }
@@ -172,6 +186,106 @@ bool pcaWriteFrame(I2cBusContext *bus, const MotorDriveConfig *config, const Mec
   return i2cBusWriteRegister(bus, config->i2c_address, kPcaLed0OnL, payload, sizeof(payload));
 }
 
+bool writeChannel(MotorDriveContext *ctx, uint8_t channel, uint16_t pwm_value) {
+  if (ctx == nullptr || !ctx->initialized || channel > 15U) {
+    return false;
+  }
+
+  const uint16_t clamped = (pwm_value > static_cast<uint16_t>(ctx->config.pwm_max))
+                               ? static_cast<uint16_t>(ctx->config.pwm_max)
+                               : pwm_value;
+  const uint8_t bytes[4] = {
+      0U,
+      0U,
+      static_cast<uint8_t>(clamped & 0xFFU),
+      static_cast<uint8_t>((clamped >> 8) & 0x0FU),
+  };
+  return i2cBusWriteRegister(ctx->bus,
+                             ctx->config.i2c_address,
+                             static_cast<uint8_t>(kPcaLed0OnL + (4U * channel)),
+                             bytes,
+                             sizeof(bytes));
+}
+
+bool driveMotor(MotorDriveContext *ctx,
+                uint8_t forward_channel,
+                uint8_t reverse_channel,
+                int16_t pwm_value) {
+  if (ctx == nullptr || !ctx->initialized) {
+    return false;
+  }
+
+  const int16_t clamped = clampPwm(ctx, pwm_value);
+  if (clamped > 0) {
+    return writeChannel(ctx, forward_channel, static_cast<uint16_t>(clamped)) &&
+           writeChannel(ctx, reverse_channel, 0U);
+  } else if (clamped < 0) {
+    return writeChannel(ctx, forward_channel, 0U) &&
+           writeChannel(ctx, reverse_channel, static_cast<uint16_t>(-clamped));
+  } else {
+    return writeChannel(ctx, forward_channel, 0U) &&
+           writeChannel(ctx, reverse_channel, 0U);
+  }
+}
+
+MecanumWheelPwm applyMotion(MotorDriveContext *ctx, MotionPrimitive primitive, int8_t direction) {
+  MecanumWheelPwm wheel_pwm;
+  memset(&wheel_pwm, 0, sizeof(wheel_pwm));
+
+  if (ctx == nullptr) {
+    return wheel_pwm;
+  }
+
+  switch (primitive) {
+    case MOTION_TRACKING:
+      wheel_pwm = makeWheelPwm(ctx, 1, 1, 1, 1);
+      break;
+
+    case MOTION_ROTATE:
+      wheel_pwm = (direction < 0) ? makeWheelPwm(ctx, 1, -1, 1, -1)
+                                  : makeWheelPwm(ctx, -1, 1, -1, 1);
+      break;
+
+    case MOTION_STOP:
+    default:
+      wheel_pwm = makeWheelPwm(ctx, 0, 0, 0, 0);
+      break;
+  }
+
+  if (ctx->output_seeded && wheelPwmEquals(&ctx->last_wheel_pwm, &wheel_pwm)) {
+    return wheel_pwm;
+  }
+
+  bool wrote = false;
+  if (usesContiguousDefaultMotorChannels(&ctx->config)) {
+    wrote = pcaWriteFrame(ctx->bus, &ctx->config, &wheel_pwm);
+  } else {
+    wrote = driveMotor(ctx,
+                       ctx->config.front_left.forward_channel,
+                       ctx->config.front_left.reverse_channel,
+                       wheel_pwm.front_left) &&
+            driveMotor(ctx,
+                       ctx->config.front_right.forward_channel,
+                       ctx->config.front_right.reverse_channel,
+                       wheel_pwm.front_right) &&
+            driveMotor(ctx,
+                       ctx->config.rear_left.forward_channel,
+                       ctx->config.rear_left.reverse_channel,
+                       wheel_pwm.rear_left) &&
+            driveMotor(ctx,
+                       ctx->config.rear_right.forward_channel,
+                       ctx->config.rear_right.reverse_channel,
+                       wheel_pwm.rear_right);
+  }
+
+  if (wrote) {
+    ctx->last_wheel_pwm = wheel_pwm;
+    ctx->output_seeded = true;
+  }
+
+  return wheel_pwm;
+}
+
 }  // namespace
 
 bool motorDriveInit(MotorDriveContext *ctx, const MotorDriveConfig *config, I2cBusContext *bus) {
@@ -195,150 +309,23 @@ bool motorDriveInit(MotorDriveContext *ctx, const MotorDriveConfig *config, I2cB
   return true;
 }
 
-bool motorDriveWriteChannel(MotorDriveContext *ctx, uint8_t channel, uint16_t pwm_value) {
-  if (ctx == nullptr || !ctx->initialized || channel > 15U) {
-    return false;
-  }
-
-  const uint16_t clamped = (pwm_value > static_cast<uint16_t>(ctx->config.pwm_max))
-                               ? static_cast<uint16_t>(ctx->config.pwm_max)
-                               : pwm_value;
-  const uint8_t bytes[4] = {
-      0U,
-      0U,
-      static_cast<uint8_t>(clamped & 0xFFU),
-      static_cast<uint8_t>((clamped >> 8) & 0x0FU),
-  };
-  return i2cBusWriteRegister(ctx->bus,
-                             ctx->config.i2c_address,
-                             static_cast<uint8_t>(kPcaLed0OnL + (4U * channel)),
-                             bytes,
-                             sizeof(bytes));
-}
-
-int16_t motorDriveClamp(const MotorDriveContext *ctx, int16_t pwm_value) {
-  if (ctx == nullptr) {
-    return 0;
-  }
-
-  if (pwm_value > ctx->config.pwm_max) {
-    return ctx->config.pwm_max;
-  }
-  if (pwm_value < -ctx->config.pwm_max) {
-    return -ctx->config.pwm_max;
-  }
-  return pwm_value;
-}
-
-bool motorDriveDriveMotor(MotorDriveContext *ctx,
-                         uint8_t forward_channel,
-                         uint8_t reverse_channel,
-                         int16_t pwm_value) {
-  if (ctx == nullptr || !ctx->initialized) {
-    return false;
-  }
-
-  const int16_t clamped = motorDriveClamp(ctx, pwm_value);
-  if (clamped > 0) {
-    return motorDriveWriteChannel(ctx, forward_channel, static_cast<uint16_t>(clamped)) &&
-           motorDriveWriteChannel(ctx, reverse_channel, 0U);
-  } else if (clamped < 0) {
-    return motorDriveWriteChannel(ctx, forward_channel, 0U) &&
-           motorDriveWriteChannel(ctx, reverse_channel, static_cast<uint16_t>(-clamped));
-  } else {
-    return motorDriveWriteChannel(ctx, forward_channel, 0U) &&
-           motorDriveWriteChannel(ctx, reverse_channel, 0U);
-  }
-}
-
-MecanumWheelPwm motorDriveApplyMotion(MotorDriveContext *ctx, MotionPrimitive primitive, int8_t direction) {
-  MecanumWheelPwm wheel_pwm;
-  memset(&wheel_pwm, 0, sizeof(wheel_pwm));
-
-  if (ctx == nullptr) {
-    return wheel_pwm;
-  }
-
-  switch (primitive) {
-    case MOTION_FORWARD:
-      wheel_pwm = makeWheelPwm(ctx, 1, 1, 1, 1);
-      break;
-
-    case MOTION_ARC:
-      wheel_pwm = (direction < 0) ? makeWheelPwm(ctx, 1, 0, 1, 0) : makeWheelPwm(ctx, 0, 1, 0, 1);
-      break;
-
-    case MOTION_ROTATE:
-      wheel_pwm = (direction < 0) ? makeWheelPwm(ctx, 1, -1, 1, -1)
-                                  : makeWheelPwm(ctx, -1, 1, -1, 1);
-      break;
-
-    case MOTION_REAR_PIVOT:
-      wheel_pwm = (direction < 0) ? makeWheelPwm(ctx, -1, 1, 0, 0)
-                                  : makeWheelPwm(ctx, 1, -1, 0, 0);
-      break;
-
-    case MOTION_STOP:
-    default:
-      wheel_pwm = makeWheelPwm(ctx, 0, 0, 0, 0);
-      break;
-  }
-
-  if (ctx->output_seeded && wheelPwmEquals(&ctx->last_wheel_pwm, &wheel_pwm)) {
-    return wheel_pwm;
-  }
-
-  bool wrote = false;
-  if (usesContiguousDefaultMotorChannels(&ctx->config)) {
-    wrote = pcaWriteFrame(ctx->bus, &ctx->config, &wheel_pwm);
-  } else {
-    wrote = motorDriveDriveMotor(ctx,
-                                 ctx->config.front_left.forward_channel,
-                                 ctx->config.front_left.reverse_channel,
-                                 wheel_pwm.front_left) &&
-            motorDriveDriveMotor(ctx,
-                                 ctx->config.front_right.forward_channel,
-                                 ctx->config.front_right.reverse_channel,
-                                 wheel_pwm.front_right) &&
-            motorDriveDriveMotor(ctx,
-                                 ctx->config.rear_left.forward_channel,
-                                 ctx->config.rear_left.reverse_channel,
-                                 wheel_pwm.rear_left) &&
-            motorDriveDriveMotor(ctx,
-                                 ctx->config.rear_right.forward_channel,
-                                 ctx->config.rear_right.reverse_channel,
-                                 wheel_pwm.rear_right);
-  }
-
-  if (wrote) {
-    ctx->last_wheel_pwm = wheel_pwm;
-    ctx->output_seeded = true;
-  }
-
-  return wheel_pwm;
-}
-
 MecanumWheelPwm motorDriveApplyCommand(MotorDriveContext *ctx, const MotionCommand *command) {
   if (command == nullptr) {
-    return motorDriveApplyMotion(ctx, MOTION_STOP, 0);
+    return applyMotion(ctx, MOTION_STOP, 0);
   }
-  return motorDriveApplyMotion(ctx, command->primitive, command->direction);
+  return applyMotion(ctx, command->primitive, command->direction);
 }
 
 void motorDriveStopAll(MotorDriveContext *ctx) {
-  motorDriveApplyMotion(ctx, MOTION_STOP, 0);
+  applyMotion(ctx, MOTION_STOP, 0);
 }
 
 const char *motionPrimitiveName(MotionPrimitive primitive) {
   switch (primitive) {
-    case MOTION_FORWARD:
-      return "FORWARD";
-    case MOTION_ARC:
-      return "ARC";
+    case MOTION_TRACKING:
+      return "TRACKING";
     case MOTION_ROTATE:
       return "ROTATE";
-    case MOTION_REAR_PIVOT:
-      return "REAR_PIVOT";
     case MOTION_STOP:
     default:
       return "STOP";

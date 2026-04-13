@@ -15,24 +15,16 @@ struct ControlConfig {
   float confidence_tracking_threshold;
   float confidence_lost_threshold;
   float position_filter_alpha;
-  float center_enter_threshold;
-  float center_exit_threshold;
-  float rotate_threshold;
-  uint16_t direction_hold_ms;
-  uint16_t motion_hold_ms;
+  float tracking_position_threshold;
 };
 
 struct ControlEstimate {
   float position;
-  float sensed_position;
   float error;
   float confidence;
-  float total_signal;
-  float peak_signal;
   bool line_present;
   bool line_strong;
   uint8_t active_mask;
-  uint8_t sensed_mask;
 };
 
 struct ControlOutput {
@@ -49,17 +41,14 @@ struct ControlContext {
   ControlConfig config;
   float last_valid_position;
   float filtered_position;
-  uint32_t last_direction_change_ms;
-  uint32_t last_motion_change_ms;
   bool filter_seeded;
   bool line_seen_once;
   int8_t last_direction;
-  MotionPrimitive last_motion;
 };
 
 void controlInit(ControlContext *ctx, const ControlConfig *config);
 void controlEstimateLine(const ControlContext *ctx, const SensorProcessedData *sensor_data, ControlEstimate *estimate);
 void controlReset(ControlContext *ctx);
-ControlOutput controlCompute(ControlContext *ctx, const ControlEstimate *estimate, BotState state, uint32_t now_ms);
+ControlOutput controlCompute(ControlContext *ctx, const ControlEstimate *estimate, BotState state);
 
 #endif
