@@ -35,19 +35,20 @@ constexpr float kSignalActivateThreshold = 18.0f;
 constexpr float kSignalDeactivateThreshold = 10.0f;
 constexpr float kBaselineFollowAlpha = 0.0025f;
 // Apply sensor correction once in the signal pipeline.
-constexpr float kSensorScale[SENSOR_COUNT] = {1.000f, 0.70f, 0.495f};
+constexpr float kSensorScale[SENSOR_COUNT] = {1.000f, 0.620f, 0.495f};
 
 constexpr int16_t kPwmMax = 4095;
-constexpr int16_t MOTOR_PWM = 2500;
+constexpr int16_t kTrackingPwm = 2500;
+constexpr int16_t kRotatePwm = 1900;
 
 constexpr float kConfidenceTotalRef = 150.0f;
 constexpr float kConfidencePeakRef = 90.0f;
-constexpr float kConfidenceTrackingThreshold = 0.25f;
+constexpr float kConfidenceTrackingThreshold = 0.32f;
 constexpr float kConfidenceLostThreshold = 0.04f;
-constexpr float kPositionFilterAlpha = 0.80;
-constexpr float kTrackingPositionThreshold = 0.7f;
-constexpr uint8_t kTrackingConfirmCount = 3;
-constexpr uint8_t kRotateConfirmCount = 5;
+constexpr float kPositionFilterAlpha = 0.72f;
+constexpr float kTrackingPositionThreshold = 0.95f;
+constexpr uint8_t kTrackingConfirmCount = 5;
+constexpr uint8_t kRotateConfirmCount = 6;
 
 // Keep this array aligned with the physical left-to-right sensor order.
 // To reverse the sensor order later, only swap these positions.
@@ -97,7 +98,8 @@ static MotorDriveConfig makeMotorConfig() {
   config.i2c_address = AppConfig::kPca9685Address;
   config.pwm_frequency_hz = 1000;
   config.pwm_max = AppConfig::kPwmMax;
-  config.motor_pwm = AppConfig::MOTOR_PWM;
+  config.tracking_pwm = AppConfig::kTrackingPwm;
+  config.rotate_pwm = AppConfig::kRotatePwm;
   config.front_left_reversed = AppConfig::FL_REVERSED;
   config.front_right_reversed = AppConfig::FR_REVERSED;
   config.rear_left_reversed = AppConfig::RL_REVERSED;
@@ -273,8 +275,10 @@ void setup() {
   Serial.println(AppConfig::kI2cSclPin);
   Serial.print("i2c_freq=");
   Serial.println(AppConfig::kI2cClockHz);
-  Serial.print("motor_pwm=");
-  Serial.println(AppConfig::MOTOR_PWM);
+  Serial.print("tracking_pwm=");
+  Serial.println(AppConfig::kTrackingPwm);
+  Serial.print("rotate_pwm=");
+  Serial.println(AppConfig::kRotatePwm);
   Serial.print("warmup_ms=");
   Serial.println(AppConfig::kCalibrationWarmupMs);
   Serial.print("signal_hysteresis=");

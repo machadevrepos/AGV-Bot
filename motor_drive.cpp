@@ -20,7 +20,18 @@ int16_t directionToPwm(const MotorDriveContext *ctx, int8_t direction, bool reve
   }
 
   const int8_t final_direction = applyReverse(direction, reversed);
-  return (final_direction > 0) ? ctx->config.motor_pwm : static_cast<int16_t>(-ctx->config.motor_pwm);
+  return final_direction;
+}
+
+int16_t pwmForMotion(const MotorDriveContext *ctx, MotionPrimitive primitive) {
+  if (ctx == nullptr) {
+    return 0;
+  }
+
+  if (primitive == MOTION_ROTATE) {
+    return ctx->config.rotate_pwm;
+  }
+  return ctx->config.tracking_pwm;
 }
 
 int16_t clampPwm(const MotorDriveContext *ctx, int16_t pwm_value) {
@@ -38,6 +49,7 @@ int16_t clampPwm(const MotorDriveContext *ctx, int16_t pwm_value) {
 }
 
 MecanumWheelPwm makeWheelPwm(const MotorDriveContext *ctx,
+                             MotionPrimitive primitive,
                              int8_t fl_direction,
                              int8_t fr_direction,
                              int8_t rl_direction,
@@ -49,14 +61,15 @@ MecanumWheelPwm makeWheelPwm(const MotorDriveContext *ctx,
     return wheel_pwm;
   }
 
+  const int16_t base_pwm = pwmForMotion(ctx, primitive);
   wheel_pwm.front_left = clampPwm(
-      ctx, directionToPwm(ctx, fl_direction, ctx->config.front_left_reversed));
+      ctx, static_cast<int16_t>(directionToPwm(ctx, fl_direction, ctx->config.front_left_reversed) * base_pwm));
   wheel_pwm.front_right = clampPwm(
-      ctx, directionToPwm(ctx, fr_direction, ctx->config.front_right_reversed));
+      ctx, static_cast<int16_t>(directionToPwm(ctx, fr_direction, ctx->config.front_right_reversed) * base_pwm));
   wheel_pwm.rear_left = clampPwm(
-      ctx, directionToPwm(ctx, rl_direction, ctx->config.rear_left_reversed));
+      ctx, static_cast<int16_t>(directionToPwm(ctx, rl_direction, ctx->config.rear_left_reversed) * base_pwm));
   wheel_pwm.rear_right = clampPwm(
-      ctx, directionToPwm(ctx, rr_direction, ctx->config.rear_right_reversed));
+      ctx, static_cast<int16_t>(directionToPwm(ctx, rr_direction, ctx->config.rear_right_reversed) * base_pwm));
   return wheel_pwm;
 }
 
@@ -238,17 +251,17 @@ MecanumWheelPwm applyMotion(MotorDriveContext *ctx, MotionPrimitive primitive, i
 
   switch (primitive) {
     case MOTION_TRACKING:
-      wheel_pwm = makeWheelPwm(ctx, 1, 1, 1, 1);
+      wheel_pwm = makeWheelPwm(ctx, primitive, 1, 1, 1, 1);
       break;
 
     case MOTION_ROTATE:
-      wheel_pwm = (direction < 0) ? makeWheelPwm(ctx, 1, -1, 1, -1)
-                                  : makeWheelPwm(ctx, -1, 1, -1, 1);
+      wheel_pwm = (direction < 0) ? makeWheelPwm(ctx, primitive, 1, -1, 1, -1)
+                                  : makeWheelPwm(ctx, primitive, -1, 1, -1, 1);
       break;
 
     case MOTION_STOP:
     default:
-      wheel_pwm = makeWheelPwm(ctx, 0, 0, 0, 0);
+      wheel_pwm = makeWheelPwm(ctx, primitive, 0, 0, 0, 0);
       break;
   }
 

@@ -32,7 +32,8 @@ struct MotorDriveConfig {
   uint8_t i2c_address;
   uint16_t pwm_frequency_hz;
   int16_t pwm_max;
-  int16_t motor_pwm;
+  int16_t tracking_pwm;
+  int16_t rotate_pwm;
   bool front_left_reversed;
   bool front_right_reversed;
   bool rear_left_reversed;
