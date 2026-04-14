@@ -35,16 +35,16 @@ constexpr float kSignalActivateThreshold = 18.0f;
 constexpr float kSignalDeactivateThreshold = 10.0f;
 constexpr float kBaselineFollowAlpha = 0.0025f;
 // Apply sensor correction once in the signal pipeline.
-constexpr float kSensorScale[SENSOR_COUNT] = {1.000f, 0.480f, 0.495f};
+constexpr float kSensorScale[SENSOR_COUNT] = {1.000f, 0.70f, 0.495f};
 
 constexpr int16_t kPwmMax = 4095;
-constexpr int16_t MOTOR_PWM = 2000;
+constexpr int16_t MOTOR_PWM = 2500;
 
 constexpr float kConfidenceTotalRef = 150.0f;
 constexpr float kConfidencePeakRef = 90.0f;
 constexpr float kConfidenceTrackingThreshold = 0.25f;
 constexpr float kConfidenceLostThreshold = 0.04f;
-constexpr float kPositionFilterAlpha = 0.950;
+constexpr float kPositionFilterAlpha = 0.80;
 constexpr float kTrackingPositionThreshold = 0.7f;
 constexpr uint8_t kTrackingConfirmCount = 3;
 constexpr uint8_t kRotateConfirmCount = 5;
